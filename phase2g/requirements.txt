@@ -1,0 +1,6 @@
+PySide6==6.9.3
+Gerbonara==1.6.3
+PyGerber==2.4.3
+Shapely==2.2.0
+Matplotlib==3.11.2
+NumPy==2.5.4

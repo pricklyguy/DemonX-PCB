@@ -1,0 +1,3 @@
+pygerber[svg]==2.4.3
+gerbonara==1.6.3
+shapely==2.2.0

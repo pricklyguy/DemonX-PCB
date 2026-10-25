@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demonx.local/schemas/pcb-manufacturing/0.1.0/schema.json",
+  "title": "DemonX PCB Prep manufacturing model (draft)",
+  "description": "Preliminary structured handoff model. Coordinates are millimetres in a declared board frame; exact source primitives and derived polygonal geometry remain distinguishable.",
+  "type": "object",
+  "required": ["schemaVersion", "units", "board", "sources", "layers", "drills", "slots", "diagnostics"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {"const": "0.1.0"},
+    "units": {"const": "mm"},
+    "board": {"$ref": "#/$defs/board"},
+    "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+    "drills": {"type": "array", "items": {"$ref": "#/$defs/drill"}},
+    "slots": {"type": "array", "items": {"$ref": "#/$defs/slot"}},
+    "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}},
+    "metadata": {"type": "object", "additionalProperties": true}
+  },
+  "$defs": {
+    "point": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "minItems": 2, "maxItems": 2},
+    "transform": {
+      "type": "object", "required": ["matrix", "meaning"], "additionalProperties": false,
+      "properties": {
+        "matrix": {"type": "array", "prefixItems": [
+          {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3},
+          {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 3, "maxItems": 3},
+          {"type": "array", "prefixItems": [{"const": 0}, {"const": 0}, {"const": 1}], "minItems": 3, "maxItems": 3}
+        ], "minItems": 3, "maxItems": 3},
+        "meaning": {"type": "string"}
+      }
+    },
+    "provenance": {
+      "type": "object", "required": ["sourceId"], "additionalProperties": true,
+      "properties": {
+        "sourceId": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "objectIndex": {"type": "integer", "minimum": 0}, "primitiveIndex": {"type": "integer", "minimum": 0},
+        "featureIndex": {"type": "integer", "minimum": 0}, "sourceToolCode": {"type": "string"},
+        "sourceAttributes": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "source": {
+      "type": "object", "required": ["sourceId", "fileName", "sha256", "format", "detectedFunction", "unit", "coordinateFormat"], "additionalProperties": false,
+      "properties": {
+        "sourceId": {"type": "string"}, "fileName": {"type": "string"}, "relativePath": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"}, "format": {"enum": ["Gerber", "Excellon", "XNC", "unknown"]},
+        "detectedFunction": {"type": "string"}, "unit": {"const": "mm"}, "coordinateFormat": {"type": "object", "additionalProperties": true},
+        "originalUnit": {"type": "string"}, "parser": {"type": "string"}
+      }
+    },
+    "board": {
+      "type": "object", "required": ["frame", "sideTransforms", "outline"], "additionalProperties": false,
+      "properties": {
+        "frame": {"type": "object", "required": ["unit", "origin", "xAxis", "yAxis", "handedness"], "additionalProperties": false,
+          "properties": {"unit": {"const": "mm"}, "origin": {"$ref": "#/$defs/point"}, "xAxis": {"type": "string"}, "yAxis": {"type": "string"}, "handedness": {"enum": ["right-handed", "left-handed"]}, "description": {"type": "string"}}},
+        "sideTransforms": {"type": "object", "required": ["top", "bottom"], "additionalProperties": false,
+          "properties": {"top": {"$ref": "#/$defs/transform"}, "bottom": {"$ref": "#/$defs/transform"}}},
+        "outline": {"type": ["object", "null"], "description": "Explicit outer profile and internal cutout curves/polygons, never inferred from copper bounds."},
+        "boundsMm": {"type": ["array", "null"], "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}, {"type": "number"}], "minItems": 4, "maxItems": 4}
+      }
+    },
+    "primitive": {
+      "type": "object", "required": ["kind", "provenance"], "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["line", "arc", "circle", "rectangle", "polygon", "flash", "region"]},
+        "start": {"$ref": "#/$defs/point"}, "end": {"$ref": "#/$defs/point"}, "center": {"$ref": "#/$defs/point"},
+        "clockwise": {"type": "boolean"}, "radiusMm": {"type": "number", "exclusiveMinimum": 0}, "widthMm": {"type": "number", "minimum": 0},
+        "diameterMm": {"type": "number", "exclusiveMinimum": 0}, "vertices": {"type": "array", "items": {"$ref": "#/$defs/point"}},
+        "aperture": {"type": "object", "additionalProperties": true}, "polarity": {"enum": ["dark", "clear"]},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "layer": {
+      "type": "object", "required": ["semanticName", "function", "side", "sourceIds", "primitives"], "additionalProperties": false,
+      "properties": {
+        "semanticName": {"type": "string"}, "function": {"enum": ["copper", "profile", "soldermask", "legend", "paste", "documentation", "drill-drawing", "isolation", "other"]},
+        "side": {"enum": ["top", "bottom", "both", "none"]}, "sourceIds": {"type": "array", "items": {"type": "string"}},
+        "primitives": {"type": "array", "items": {"$ref": "#/$defs/primitive"}},
+        "derivedGeometry": {"type": ["object", "null"], "description": "Optional GeoJSON-like polygon composition; polygonization tolerance and source primitive mapping must be recorded."},
+        "polygonizationToleranceMm": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
+    "drill": {
+      "type": "object", "required": ["positionMm", "originalDiameterMm", "nominalGroup", "plating", "role", "provenance"], "additionalProperties": false,
+      "properties": {
+        "positionMm": {"$ref": "#/$defs/point"}, "originalDiameterMm": {"type": "number", "exclusiveMinimum": 0},
+        "nominalGroup": {"type": ["string", "null"]}, "plating": {"enum": ["plated", "non-plated", "unknown"]},
+        "role": {"enum": ["via", "through-hole", "unknown"]}, "profileBoreCandidate": {"type": "boolean"},
+        "selectedCutterDiameterMm": {"type": ["number", "null"], "exclusiveMinimum": 0}, "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "slot": {
+      "type": "object", "required": ["path", "originalDiameterMm", "plating", "provenance"], "additionalProperties": false,
+      "properties": {
+        "path": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["line", "arc"]}, "start": {"$ref": "#/$defs/point"}, "end": {"$ref": "#/$defs/point"}, "center": {"$ref": "#/$defs/point"}, "clockwise": {"type": "boolean"}}},
+        "originalDiameterMm": {"type": "number", "exclusiveMinimum": 0}, "plating": {"enum": ["plated", "non-plated", "unknown"]}, "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "diagnostic": {
+      "type": "object", "required": ["severity", "code", "message"], "additionalProperties": true,
+      "properties": {"severity": {"enum": ["info", "warning", "error"]}, "code": {"type": "string"}, "message": {"type": "string"}, "provenance": {"$ref": "#/$defs/provenance"}}
+    }
+  }
+}
+

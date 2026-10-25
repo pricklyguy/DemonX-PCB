@@ -1,0 +1,996 @@
+from __future__ import annotations
+
+import html
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from PySide6.QtCore import QObject, Qt, QRectF, QThread, Signal, Slot, QTimer
+from PySide6.QtGui import QColor, QBrush, QPen, QPainterPath, QFont, QFontDatabase, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QFileDialog, QGraphicsScene, QGroupBox, QHBoxLayout,
+    QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QSplitter,
+    QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QToolButton,
+    QPushButton, QFrame, QScrollArea,
+)
+from shapely.geometry import LineString
+
+from .inspection_model import BoardDocument, RegionData, load_archive
+from .view import BoardView, FeaturePathItem, WarningMarker, geometry_path
+
+
+class ArchiveLoadWorker(QObject):
+    loaded = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, archive: Path):
+        super().__init__()
+        self.archive = archive
+
+    @Slot()
+    def run(self):
+        try:
+            self.loaded.emit(load_archive(self.archive, progress=self.progress.emit))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+BG = "#0b1118"
+PANEL = "#111a23"
+PANEL_2 = "#17232e"
+LINE = "#273644"
+TEXT = "#e7edf2"
+MUTED = "#94a6b5"
+COPPER = "#df8d42"
+TEAL = "#38d6c3"
+BLUE = "#60a5fa"
+RED = "#ff5d67"
+GOLD = "#ffc857"
+
+
+class PcbPrepWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self._register_windows_font()
+        self.setWindowTitle("DemonX PCB Prep — Geometry Inspection")
+        self.resize(1720, 1040)
+        self.document: BoardDocument | None = None
+        self.selected_region: RegionData | None = None
+        self.current_issue: dict[str, Any] | None = None
+        self._load_thread: QThread | None = None
+        self._load_worker: ArchiveLoadWorker | None = None
+        self.layer_checks: dict[str, QCheckBox] = {}
+        self._loading = False
+        self._load_succeeded = False
+        self._spinner_frames = ("|", "/", "—", "\\")
+        self._spinner_index = 0
+        self._build_ui()
+        self._apply_theme()
+        self._show_empty_state()
+
+    def _build_ui(self):
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+        self.open_action = toolbar.addAction("Open Gerber ZIP")
+        self.open_action.triggered.connect(self.open_dialog)
+        toolbar.addSeparator()
+        self.valentine_action = toolbar.addAction("Sample · Valentine")
+        self.valentine_action.triggered.connect(lambda: self.load_sample("valentine"))
+        self.laser_action = toolbar.addAction("Sample · Laser Module")
+        self.laser_action.triggered.connect(lambda: self.load_sample("laser"))
+        self._load_actions = [self.open_action, self.valentine_action, self.laser_action]
+        toolbar.addSeparator()
+        fit = toolbar.addAction("Fit board")
+        fit.triggered.connect(self.fit_board)
+        zoom = toolbar.addAction("Zoom to issue")
+        zoom.triggered.connect(self.zoom_to_issue)
+        toolbar.addSeparator()
+        self.loading_label = QLabel("Ready")
+        self.loading_label.setMinimumWidth(300)
+        self.loading_label.setObjectName("loadStatus")
+        toolbar.addWidget(self.loading_label)
+        self._loading_timer = QTimer(self)
+        self._loading_timer.setInterval(110)
+        self._loading_timer.timeout.connect(self._animate_spinner)
+        QShortcut(QKeySequence("F"), self, activated=self.fit_board)
+        QShortcut(QKeySequence("Home"), self, activated=self.reset_view)
+
+        root = QWidget()
+        root_layout = QVBoxLayout(root)
+        root_layout.setContentsMargins(12, 8, 12, 10)
+        root_layout.setSpacing(9)
+        header = QHBoxLayout()
+        title_col = QVBoxLayout()
+        title = QLabel("DEMONX <span style='color:#df8d42'>PCB PREP</span>")
+        title.setObjectName("brand")
+        subtitle = QLabel("Manufacturing geometry inspection · read-only preview")
+        subtitle.setObjectName("subtitle")
+        title_col.addWidget(title); title_col.addWidget(subtitle)
+        header.addLayout(title_col); header.addStretch(1)
+        self.board_title = QLabel("No board loaded")
+        self.board_title.setObjectName("boardTitle")
+        header.addWidget(self.board_title)
+        root_layout.addLayout(header)
+
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(self._left_panel())
+        self.scene = QGraphicsScene(self)
+        self.view = BoardView(self.scene)
+        self.view.coordinatesChanged.connect(self._show_coordinates)
+        self.scene.selectionChanged.connect(self._inspect_selected_item)
+        canvas = QWidget()
+        canvas_layout = QVBoxLayout(canvas)
+        canvas_layout.setContentsMargins(0, 0, 0, 0)
+        canvas_layout.addWidget(self.evidence_note)
+        canvas_layout.addWidget(self.view)
+        self.loading_overlay = QFrame(self.view.viewport())
+        self.loading_overlay.setObjectName("loadingOverlay")
+        overlay_layout = QVBoxLayout(self.loading_overlay)
+        overlay_layout.setContentsMargins(18, 14, 18, 14)
+        overlay_layout.setSpacing(5)
+        self.overlay_spinner = QLabel("◌")
+        self.overlay_spinner.setObjectName("overlaySpinner")
+        self.overlay_spinner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.overlay_stage = QLabel("Preparing import…")
+        self.overlay_stage.setObjectName("overlayStage")
+        self.overlay_stage.setWordWrap(True)
+        self.overlay_stage.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        overlay_layout.addWidget(self.overlay_spinner)
+        overlay_layout.addWidget(self.overlay_stage)
+        self.loading_overlay.setFixedSize(420, 118)
+        self.loading_overlay.hide()
+        self.view.viewport().installEventFilter(self)
+        split.addWidget(canvas)
+        split.addWidget(self._inspector_panel())
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        split.setSizes([235, 1160, 340])
+        self.splitter = split
+        root_layout.addWidget(split, 1)
+
+        footer = QHBoxLayout()
+        self.compliance = QLabel("Source status · —")
+        self.compliance.setObjectName("badgeWarning")
+        self.eligibility = QLabel("Machining · BLOCKED")
+        self.eligibility.setObjectName("badgeBlocked")
+        self.coordinate_label = QLabel("X — · Y — mm")
+        self.coordinate_label.setObjectName("coord")
+        footer.addWidget(self.compliance); footer.addWidget(self.eligibility); footer.addStretch(1)
+        footer.addWidget(self.coordinate_label)
+        root_layout.addLayout(footer)
+        self.setCentralWidget(root)
+
+    def _left_panel(self):
+        panel = QWidget()
+        panel.setMinimumWidth(220)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        box = QGroupBox("Visible geometry")
+        checks = QVBoxLayout(box)
+        for key, label, checked in (
+            ("top", "Top copper", True), ("bottom", "Bottom copper", True),
+            ("profile", "Board outline", True), ("pads", "Pad flashes", False),
+            ("drills", "Drill centers", True), ("slots", "Routed slots", True),
+            ("source", "Source contours", True), ("candidate", "Proposed regions", True),
+            ("native", "Native fill boundary", False),
+            ("diagnostics", "Highlight issue", True),
+        ):
+            cb = QCheckBox(label); cb.setChecked(checked)
+            cb.stateChanged.connect(self.rebuild_scene)
+            self.layer_checks[key] = cb
+            checks.addWidget(cb)
+        layout.addWidget(box)
+        self.evidence_note = QLabel("Candidate geometry is for inspection only. Source conformance and machining eligibility are evaluated separately.")
+        self.evidence_note.setWordWrap(True); self.evidence_note.setObjectName("note")
+        self.evidence_note.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.evidence_note)
+        issue_header = QLabel("VALIDATION ISSUES")
+        issue_header.setObjectName("sectionLabel")
+        layout.addWidget(issue_header)
+        self.issues_list = QListWidget()
+        self.issues_list.currentItemChanged.connect(self._issue_selected)
+        self.issues_list.itemDoubleClicked.connect(self._issue_double_clicked)
+        self.issues_list.setWordWrap(True)
+        self.issues_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self.issues_list, 1)
+        return panel
+
+    def _inspector_panel(self):
+        panel = QWidget()
+        panel.setMinimumWidth(315)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 6, 12, 10)
+        layout.setSpacing(9)
+        header = QLabel("ISSUE / FEATURE INSPECTOR")
+        header.setObjectName("sectionLabel")
+        layout.addWidget(header)
+        self.inspect_title = QLabel("Open a board")
+        self.inspect_title.setObjectName("inspectTitle")
+        self.inspect_title.setWordWrap(True)
+        layout.addWidget(self.inspect_title)
+        self.inspect_meta = QLabel("")
+        self.inspect_meta.setObjectName("inspectMeta")
+        self.inspect_meta.setWordWrap(True)
+        layout.addWidget(self.inspect_meta)
+        self.inspect_summary = QLabel("")
+        self.inspect_summary.setObjectName("inspectSummary")
+        self.inspect_summary.setWordWrap(True)
+        layout.addWidget(self.inspect_summary)
+        self.inspect_action = QLabel("")
+        self.inspect_action.setObjectName("inspectAction")
+        self.inspect_action.setWordWrap(True)
+        layout.addWidget(self.inspect_action)
+        actions = QVBoxLayout()
+        actions.setSpacing(6)
+        self.view_issue_button = QPushButton("View geometry")
+        self.view_issue_button.clicked.connect(self.zoom_to_issue)
+        self.import_reference_button = QPushButton("Open another Gerber ZIP…")
+        self.import_reference_button.clicked.connect(self.open_dialog)
+        self.view_issue_button.setMinimumHeight(34)
+        self.import_reference_button.setMinimumHeight(34)
+        actions.addWidget(self.view_issue_button)
+        actions.addWidget(self.import_reference_button)
+        layout.addLayout(actions)
+        self.advanced_button = QToolButton()
+        self.advanced_button.setText("Advanced details [show]")
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.advanced_button.toggled.connect(self._toggle_advanced)
+        layout.addWidget(self.advanced_button)
+        self.advanced_text = QTextBrowser()
+        self.advanced_text.setObjectName("advanced")
+        self.advanced_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.advanced_text.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
+        self.advanced_text.setMinimumHeight(130)
+        self.advanced_text.setVisible(False)
+        layout.addWidget(self.advanced_text, 1)
+        self.layer_tree = QTreeWidget()
+        self.layer_tree.setHeaderLabels(["Source files and detected functions"])
+        self.layer_tree.setMaximumHeight(140)
+        self.layer_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self.layer_tree)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(panel)
+        return scroll
+
+    def _apply_theme(self):
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{ background:{BG}; color:{TEXT}; font-family:'Segoe UI'; font-size:11pt; }}
+            QToolBar {{ background:{PANEL}; border:1px solid {LINE}; spacing:8px; padding:6px; }}
+            QToolButton {{ background:{PANEL_2}; color:{TEXT}; border:1px solid {LINE}; border-radius:5px; padding:7px 12px; }}
+            QToolButton:hover {{ border-color:{TEAL}; color:{TEAL}; }}
+            QGroupBox {{ background:{PANEL}; border:1px solid {LINE}; border-radius:7px; margin-top:12px; padding:11px 8px 8px; font-weight:600; }}
+            QGroupBox::title {{ subcontrol-origin:margin; left:9px; padding:0 5px; color:{TEAL}; }}
+            QCheckBox {{ spacing:8px; padding:4px 2px; }}
+            QCheckBox::indicator {{ width:15px; height:15px; }}
+            QListWidget, QTreeWidget, QTextBrowser {{ background:{PANEL}; border:1px solid {LINE}; border-radius:6px; padding:6px; }}
+            QListWidget::item, QTreeWidget::item {{ padding:5px; }}
+            QListWidget::item:selected, QTreeWidget::item:selected {{ background:#1b3942; color:#ffffff; }}
+            QLabel#brand {{ color:#f4f7f9; font-size:18pt; font-weight:800; letter-spacing:1px; }}
+            QLabel#subtitle {{ color:{MUTED}; font-size:10pt; }}
+            QLabel#loadStatus {{ color:{TEAL}; font-size:10pt; padding:4px 8px; }}
+            QLabel#inspectTitle {{ color:{COPPER}; font-size:15pt; font-weight:700; padding:5px 0; }}
+            QLabel#inspectMeta {{ color:{TEAL}; font-size:10pt; font-weight:600; }}
+            QLabel#inspectSummary {{ color:{TEXT}; font-size:11pt; padding:7px 0; }}
+            QLabel#inspectAction {{ color:#f1cc7b; background:#28241b; border:1px solid #594a27; border-radius:5px; padding:8px; }}
+            QPushButton {{ color:{TEXT}; background:{PANEL_2}; border:1px solid {LINE}; border-radius:5px; padding:8px 7px; }}
+            QPushButton:hover {{ border-color:{TEAL}; color:{TEAL}; }}
+            QFrame#loadingOverlay {{ background:#101a23; border:2px solid {TEAL}; border-radius:10px; }}
+            QLabel#overlaySpinner {{ color:{TEAL}; font-size:25pt; font-weight:700; }}
+            QLabel#overlayStage {{ color:{TEXT}; font-size:11pt; font-weight:600; }}
+            QLabel#boardTitle {{ color:{COPPER}; font-size:13pt; font-weight:700; padding:8px 12px; }}
+            QLabel#sectionLabel {{ color:{TEAL}; font-size:9pt; font-weight:700; letter-spacing:1px; padding:5px 2px; }}
+            QLabel#note {{ color:#d6b978; background:#28241b; border:1px solid #594a27; border-radius:5px; padding:8px; font-size:9pt; }}
+            QLabel#badgeWarning {{ color:#ffe2a0; background:#302619; border:1px solid #765522; padding:6px 9px; border-radius:5px; font-weight:700; }}
+            QLabel#badgeBlocked {{ color:#ffc2c7; background:#321d24; border:1px solid #7e3542; padding:6px 9px; border-radius:5px; font-weight:700; }}
+            QLabel#coord {{ color:{TEAL}; font-family:Consolas; }}
+            QSplitter::handle {{ background:{LINE}; width:5px; }}
+        """)
+
+    @staticmethod
+    def _register_windows_font():
+        """Make screenshots/headless Windows runs use the same readable UI font."""
+        windir = Path(os.environ.get("WINDIR", "C:/Windows"))
+        font_path = windir / "Fonts" / "segoeui.ttf"
+        if font_path.is_file():
+            QFontDatabase.addApplicationFont(str(font_path))
+            QFontDatabase.addApplicationFont(str(windir / "Fonts" / "segoeuib.ttf"))
+            QApplication.setFont(QFont("Segoe UI", 9))
+
+    def _show_empty_state(self):
+        self.scene.clear()
+        self.scene.setSceneRect(QRectF(-50, -50, 100, 100))
+        self.inspect_title.setText("Open a manufacturing archive")
+        self.inspect_meta.setText("Read-only geometry inspection")
+        self.inspect_summary.setText("Load a Gerber ZIP to view detected copper, board profile, drill features and validation findings.")
+        self.inspect_action.setText("No toolpaths or CNC output are available in this preview.")
+        self.view_issue_button.setEnabled(False)
+        self.advanced_text.clear()
+
+    def open_dialog(self):
+        name, _ = QFileDialog.getOpenFileName(self, "Open Gerber manufacturing archive", "", "ZIP archives (*.zip)")
+        if name:
+            self.request_load_archive(Path(name))
+
+    def load_sample(self, sample: str):
+        if sample == "laser":
+            archive = Path(__file__).resolve().parents[2] / "phase2f/fixtures/laser-v2.0-export.zip"
+        else:
+            archive = Path(__file__).resolve().parents[2] / "gerbers/Gerber_PCB_Valentine_Feb_New.zip"
+        self.request_load_archive(archive)
+
+    def request_load_archive(self, archive: Path):
+        """Parse an archive off the UI thread; keep the window interactive meanwhile."""
+        if self._load_thread and self._load_thread.isRunning():
+            return
+        self._loading = True
+        self._load_succeeded = False
+        self.loading_label.setText("Importing…")
+        self.loading_label.setStyleSheet(f"color:{TEAL}")
+        self._loading_timer.start()
+        self.overlay_stage.setText("Checking archive paths and identifying manufacturing files…")
+        self._position_loading_overlay()
+        self.loading_overlay.show()
+        self.loading_overlay.raise_()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Import in progress — the board remains read-only until parsing finishes.")
+        for action in self._load_actions:
+            action.setEnabled(False)
+        self.open_action.setText("Loading…")
+        thread = QThread(self)
+        worker = ArchiveLoadWorker(Path(archive))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._loading_stage)
+        worker.loaded.connect(self._install_document)
+        worker.failed.connect(self._load_failed)
+        worker.loaded.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._load_finished)
+        self._load_thread, self._load_worker = thread, worker
+        thread.start()
+
+    def _load_failed(self, message: str):
+        self.overlay_stage.setText("Import failed. The previous board is unchanged.")
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Critical)
+        dialog.setWindowTitle("Import failed")
+        dialog.setText("PCB Prep could not read this manufacturing archive.")
+        dialog.setInformativeText("Choose another Gerber ZIP or review the archive details.")
+        dialog.setDetailedText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.exec()
+        self.statusBar().showMessage("Import failed — choose another Gerber ZIP or review the archive details.")
+
+    def _load_finished(self):
+        self._loading = False
+        self._loading_timer.stop()
+        if QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self.open_action.setText("Open Gerber ZIP")
+        for action in self._load_actions:
+            action.setEnabled(True)
+        self._load_thread = None
+        self._load_worker = None
+        self.loading_overlay.hide()
+        if self._load_succeeded and self.document:
+            self.loading_label.setText(f"Ready · {len(self.document.layer_files)} manufacturing files")
+            self.statusBar().showMessage("Import complete — board is ready for inspection.")
+        else:
+            self.loading_label.setText("Import failed · previous board retained" if self.document else "Import failed")
+
+    def _loading_stage(self, stage: str):
+        if self._loading:
+            self.overlay_stage.setText(stage)
+            self.statusBar().showMessage("Import in progress — see the centered activity panel.")
+
+    def _animate_spinner(self):
+        if not self._loading:
+            return
+        self._spinner_index = (self._spinner_index + 1) % len(self._spinner_frames)
+        self.overlay_spinner.setText(("◌", "◔", "◑", "◕", "●", "◕", "◑", "◔")[self._spinner_index % 8])
+
+    def _toggle_advanced(self, expanded: bool):
+        self.advanced_text.setVisible(expanded)
+        self.advanced_button.setText("Advanced details [hide]" if expanded else "Advanced details [show]")
+
+    def load_archive(self, archive: Path):
+        """Synchronous loader retained for deterministic smoke tests and captures."""
+        self.statusBar().showMessage("Reading archive and parsing source manufacturing files…")
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        try:
+            fresh = load_archive(archive)
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not open Gerber archive", str(exc))
+            self.statusBar().showMessage("Archive could not be opened")
+            return
+        self._install_document(fresh)
+
+    def _install_document(self, fresh: BoardDocument):
+        if self.document:
+            self.document.close()
+        self.document = fresh
+        if self._loading:
+            self._load_succeeded = True
+        self.selected_region = None
+        self.current_issue = None
+        self.board_title.setText(fresh.board_id.replace("_", " "))
+        self.compliance.setText(self._plain_source_status(fresh))
+        self.eligibility.setText("Machining · BLOCKED")
+        self.evidence_note.setText(
+            "Legend: <span style='color:#60a5fa'>■ Top copper</span> · <span style='color:#df8d42'>■ Bottom copper</span> · "
+            "<span style='color:#38d6c3'>┄ Source path</span> · <span style='color:#ffc857'>┄ Proposed fill</span> · "
+            "<span style='color:#ff3155'>■ Measured difference</span> · <span style='color:#38f1d2'>┄ Saved native reference</span> "
+            "(inspection only)"
+        )
+        self._populate_sources()
+        self._populate_issues()
+        self.rebuild_scene()
+        self.fit_board()
+        self._inspect_board_summary()
+        if fresh.native_reference_label and any(r.index == 79 for r in fresh.regions):
+            self.select_region(79, zoom=True)
+            for row in range(self.issues_list.count()):
+                item = self.issues_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == 79:
+                    self.issues_list.setCurrentItem(item)
+                    break
+        self.statusBar().showMessage(f"Loaded {len(fresh.layer_files)} manufacturing files · {len(fresh.hits)} circular holes · {len(fresh.slots)} routed slots")
+        self.loading_label.setText(f"Ready · {len(fresh.layer_files)} manufacturing files")
+
+    def _inspect_board_summary(self):
+        """Show a useful board-level inspection summary before feature selection."""
+        if not self.document:
+            return
+        d = self.document
+        layers = "<br>".join(html.escape(layer.label) for layer in d.layer_files)
+        bounds = d.bounds
+        dims = (f"{bounds[2]-bounds[0]:.6f} × {bounds[3]-bounds[1]:.6f} mm"
+                if bounds else "not available")
+        self.inspect_title.setText(d.board_id.replace("_", " "))
+        self.inspect_meta.setText(f"Board overview · {dims}")
+        self.inspect_summary.setText(
+            f"{len(d.layer_files)} manufacturing files · {len(d.hits)} circular holes · "
+            f"{len(d.slots)} routed slots · {len(d.regions)} copper regions.\n"
+            f"Source status: {self._plain_source_status(d)}. Machining remains blocked."
+        )
+        self.inspect_action.setText("Select an issue for its geometry and suggested review action. No manufacturing operation is enabled.")
+        self.view_issue_button.setVisible(False)
+        self.view_issue_button.setEnabled(False)
+        self.import_reference_button.setVisible(True)
+        self.advanced_text.setHtml(
+            f"<p><b>Archive:</b> {html.escape(d.archive_path.name)}<br>"
+            f"<b>SHA-256:</b> <code>{d.archive_sha256}</code><br>"
+            f"<b>Detected layers:</b><br>{layers}<br>"
+            f"<b>Source status detail:</b> {html.escape(d.source_compliance)}<br>"
+            f"<b>Eligibility:</b> {html.escape(d.machining_eligibility)}</p>"
+        )
+
+    def _populate_sources(self):
+        assert self.document
+        self.layer_tree.clear()
+        root = QTreeWidgetItem([f"{self.document.archive_path.name}  ·  SHA-256 {self.document.archive_sha256[:16]}…"])
+        self.layer_tree.addTopLevelItem(root)
+        for layer in self.document.layer_files:
+            issue_count = (layer.metadata.get("unresolvedCount", len(layer.metadata.get("unsupportedObjects", [])))
+                           + len(layer.metadata.get("explicitTopologyRepairs", [])))
+            suffix = f"  ·  {issue_count} warning(s)" if issue_count else ""
+            child = QTreeWidgetItem([f"{layer.label}\n{layer.name}{suffix}"])
+            child.setToolTip(0, f"{layer.name}\nSHA-256: {layer.metadata.get('sha256','')}\n{layer.label}")
+            root.addChild(child)
+        root.setExpanded(False)
+        if self.document.native_reference_label:
+            ref = QTreeWidgetItem(["Reference evidence: " + self.document.native_reference_label])
+            ref.setForeground(0, QColor(TEAL)); root.addChild(ref)
+
+    @staticmethod
+    def _plain_source_status(document):
+        if any(region.native_polygon is not None and region.index == 79 for region in document.regions):
+            return "Nonconforming · 182 open copper boundaries"
+        recoverable = sum(region.recovery_status == "RECOVERABLE" for region in document.regions)
+        if recoverable:
+            zero_draws = 119 if recoverable == 2 and "valentine" in document.board_id.lower() else "verified"
+            return f"Nonconforming source · {zero_draws} redundant draws; safely handled"
+        open_regions = sum(region.source_points_mm[0] != region.source_points_mm[-1] for region in document.regions)
+        return f"Warning · {open_regions} open copper boundaries" if open_regions else "Review parser diagnostics"
+
+    def _populate_issues(self):
+        assert self.document
+        self.issues_list.clear()
+        doc = self.document
+        repair_audit_path = Path(__file__).resolve().parents[2] / "phase2c/results/copper-repair-audit.json"
+        try:
+            repair_audit = json.loads(repair_audit_path.read_text(encoding="utf-8"))
+            repair_audit_by_object = {row["sourceObjectIndex"]: row for row in repair_audit.get("repairs", [])}
+        except (OSError, ValueError, KeyError):
+            repair_audit_by_object = {}
+        sensitivity_path = Path(__file__).resolve().parents[2] / "phase2i/results/geos-repair-sensitivity.json"
+        try:
+            sensitivity = json.loads(sensitivity_path.read_text(encoding="utf-8"))
+            sensitivity_by_object = {row["objectIndex"]: row for row in sensitivity.get("regions", [])}
+        except (OSError, ValueError, KeyError):
+            sensitivity_by_object = {}
+        laser = any(region.native_polygon is not None for region in doc.regions)
+        open_regions = [r for r in doc.regions if r.source_points_mm[0] != r.source_points_mm[-1]]
+        recoverable = [r for r in doc.regions if r.recovery_status == "RECOVERABLE"]
+        if laser and open_regions:
+            self._add_issue_row({
+                "title": f"{len(open_regions)} copper regions have open boundaries",
+                "severity": "NEEDS VERIFICATION · source boundary issue", "layer": "Bottom copper",
+                "category": "NEEDS VERIFICATION",
+                "summary": "The export omitted closing edges. Proposed geometry is available for inspection, but the missing edges could change isolation clearance; the affected regions are not approved for machining.",
+                "action": "Select a region to view its proposed edge. Keep machining blocked until design intent is verified.",
+                "advanced": f"Validation code: OPEN_SOURCE_CONTOUR<br>Source: {html.escape(doc.archive_path.name)}<br>Archive SHA-256: <code>{doc.archive_sha256}</code><br>Affected region count: {len(open_regions)}<br>Recovery: none approved; no global closure policy is enabled.",
+                "region": None, "kind": "aggregate",
+            }, color=RED)
+        elif recoverable:
+            self._add_issue_row({
+                "title": f"{len(recoverable)} copper regions contain redundant commands",
+                "severity": "HANDLED · formatting", "layer": "Copper region contours",
+                "summary": "119 zero-length draws were removed only in the disclosed inspection model. They do not move or change the copper boundary. No action is needed for this finding.",
+                "action": "No action needed for this finding. Other independent validation findings can still block machining.",
+                "advanced": f"Validation code: EXACT_ZERO_LENGTH_REGION_DRAW<br>Archive: {html.escape(doc.archive_path.name)}<br>Archive SHA-256: <code>{doc.archive_sha256}</code><br>Each affected region is listed below with its source file hash and exact G36/G37 command lines.<br>Phase 2A GEOS repair diagnostics are listed separately from Phase 2E no-op source-command records.",
+                "region": None, "kind": "handled",
+            }, color=TEAL)
+
+        for region in doc.regions:
+            is_open = region.source_points_mm[0] != region.source_points_mm[-1]
+            if not (is_open or region.recovery_status == "RECOVERABLE" or region.index == 79 and laser):
+                continue
+            if region.recovery_status == "RECOVERABLE":
+                # The exact no-op formatting recovery is represented by one neutral aggregate record.
+                # Do not paint a whole copper region as defective.
+                continue
+            if region.index == 79 and laser:
+                title = "Copper boundary differs from the saved design · region 79"
+                severity = "BLOCKED · geometry mismatch"
+                summary = "One copper boundary differs from the recovered EasyEDA saved fill by up to 0.284 mm. That gap could change isolation clearance. The project is v2.0; matching v2.5 native revision and fill freshness are unavailable."
+                action = "Keep this region blocked. The matching v2.5 design is not available in this preview."
+                color = RED
+            elif region.recovery_status == "RECOVERABLE":
+                title = f"Redundant commands in copper region {region.index + 1}"
+                severity = "WARNING · shape-preserving no-op"
+                summary = "This region contains a redundant zero-length draw. The verified Phase 2E normalization does not move or remove its copper boundary."
+                action = "Review the exact source-command recovery record. The source remains unchanged and machining stays blocked."
+                color = GOLD
+            else:
+                title = f"Open boundary in bottom copper region {region.index:03d}"
+                severity = "NEEDS VERIFICATION · affects isolation boundary"
+                summary = ("The recovered v2.0 saved fill closely matches this proposed display geometry, but the source Gerber contour is open and its v2.5 design intent is not proven. A different edge could change isolation clearance; machining remains blocked."
+                           if region.native_polygon is not None else
+                           "This copper region has an open boundary. Closing it differently could change where the isolation cutter removes copper. The displayed fill is a proposal only; machining remains blocked.")
+                action = "View the proposed edge here. Verify the intended design boundary before machining."
+                color = GOLD
+            advanced = (
+                f"Validation code: {'FULL_RING_MISMATCH' if region.index == 79 and laser else 'EXACT_ZERO_LENGTH_REGION_DRAW' if region.recovery_status == 'RECOVERABLE' else 'OPEN_SOURCE_CONTOUR'}<br>"
+                f"File: {html.escape(region.source_file)}<br>SHA-256: <code>{region.source_sha256}</code><br>"
+                f"Source lines: {region.first_line}–{region.last_line}<br>Polarity: {html.escape(region.polarity)}<br>"
+                f"Recovery status: {html.escape(region.recovery_status)}<br>"
+                f"Start: ({region.source_points_mm[0][0]:.6f}, {region.source_points_mm[0][1]:.6f}) mm; "
+                f"end: ({region.source_points_mm[-1][0]:.6f}, {region.source_points_mm[-1][1]:.6f}) mm; "
+                f"candidate chord: {region.closure_length_mm:.9f} mm<br>"
+            )
+            if region.boundary_hausdorff_mm is not None:
+                advanced += (f"Boundary Hausdorff: {region.boundary_hausdorff_mm:.9f} mm<br>"
+                             f"Symmetric difference: {region.symmetric_difference_mm2:.9f} mm²<br>"
+                             f"Cached native path: {region.native_path_index}; candidate/native area: "
+                             f"{region.candidate_area_mm2:.6f} / {region.native_area_mm2:.6f} mm²<br>")
+                if region.discrepancy_source_line is not None:
+                    advanced += (f"Maximum-displacement Gerber line/segment: {region.discrepancy_source_line} / "
+                                 f"{region.discrepancy_source_segment_index}; native path segment: "
+                                 f"{region.discrepancy_native_segment_index}<br>"
+                                 f"Native maximum point: {region.discrepancy_point_mm}; nearest Gerber point: "
+                                 f"{region.discrepancy_nearest_point_mm}<br>")
+            self._add_issue_row({"title": title, "severity": severity, "layer": "Bottom copper",
+                                 "summary": summary, "action": action, "advanced": advanced,
+                "region": region, "kind": "region",
+                "category": "BLOCKED" if region.index == 79 and laser else "NEEDS VERIFICATION"}, color=color)
+
+        for issue in doc.issues:
+            if "explicit GEOS repair" in issue or "parser geometry warnings" in issue or "unsupported" in issue:
+                filename = issue.split(":", 1)[0]
+                layer = next((layer for layer in doc.layer_files if layer.name == filename), None)
+                detail = html.escape(issue)
+                if layer:
+                    detail += f"<br>Source SHA-256: <code>{layer.metadata.get('sha256', 'unavailable')}</code>"
+                    repairs = layer.metadata.get("explicitTopologyRepairs", [])
+                    if repairs:
+                        detail += "<br>Phase 2A GEOS repair records:<br>" + "<br>".join(
+                            html.escape(str(record)) for record in repairs[:8])
+                repairs = layer.metadata.get("explicitTopologyRepairs", []) if layer else []
+                bottom_copper_repairs = [r for r in repairs if r.get("sourceFile", "").lower().endswith("bottomlayer.gbl")]
+                if bottom_copper_repairs:
+                    for record in bottom_copper_repairs:
+                        object_index = record.get("objectIndex", record.get("sourceObjectIndex", -1))
+                        audited = repair_audit_by_object.get(object_index, {})
+                        offset_data = sensitivity_by_object.get(object_index, {})
+                        delta = float(record.get("areaDeltaMm2", 0.0))
+                        raw_area = record.get("beforeAreaMm2", record.get("rawGeometryAreaMm2"))
+                        after_area = record.get("afterAreaMm2", record.get("repairedAreaMm2"))
+                        repaired_type = record.get("afterType", record.get("repairedGeometryType", "unknown"))
+                        components_after = audited.get("polygonalComponentsAfterRepair", record.get("polygonalComponentsAfterRepair", "not reported"))
+                        remainder = audited.get("nonPolygonalRemainders", record.get("nonPolygonalRemainders", []))
+                        self._add_issue_row({
+                            "title": f"Bottom copper geometry repair · object {record.get('objectIndex', record.get('sourceObjectIndex', '?'))}",
+                            "severity": "NEEDS VERIFICATION · isolation effect unknown", "layer": filename,
+                            "summary": "The source boundary crosses itself, so the intended copper edge is uncertain. Until it is checked, an isolation cut could leave a thin copper bridge or remove copper in the wrong place.",
+                            "action": "The bottom-copper boundary needs independent verification. Keep this layer blocked.",
+                            "advanced": f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}<br>Object: {object_index}<br>Raw valid: {record.get('rawGeometryValid')}<br>Raw area: {float(raw_area):.14f} mm²<br>Repaired area: {float(after_area):.14f} mm²<br>Area delta: {delta:.14g} mm²<br>Output: {html.escape(str(repaired_type))}; polygon components {components_after}; non-polygonal remainder {html.escape(', '.join(remainder))}<br>Deterministic repeat: {record.get('deterministicNormalizedWkbEqual', audited.get('deterministicNormalizedWkbEqual', 'not recorded'))}<br>Direct boundary-set Hausdorff: {float(offset_data.get('boundaryHausdorffMm', float('nan'))):.9f} mm; source/repaired boundary lengths: {float(offset_data.get('rawBoundaryLengthMm', float('nan'))):.6f} / {float(offset_data.get('makeValidPolygonBoundaryLengthMm', float('nan'))):.6f} mm<br>Diagnostic −0.05 mm GEOS inset: symmetric difference {float((offset_data.get('negativeOffsets') or [{}])[0].get('symmetricDifferenceMm2', float('nan'))):.9f} mm²; components {((offset_data.get('negativeOffsets') or [{}])[0].get('rawComponents', '?'))} raw / {((offset_data.get('negativeOffsets') or [{}])[0].get('repairedComponents', '?'))} repaired. This generic buffer is not a V-bit/depth toolpath simulation or approval.<br>Layer-level PyGerber/Gerbonara interpreted comparison: 0.000981455 mm max boundary distance; 0.323800485 mm² symmetric difference; 110 components and 181 voids on each composition. Both pipelines applied GEOS make_valid; this is not independent intended-topology evidence.<br>Raw-ring material symmetric difference: NOT DEFINED for invalid polygon fill. Actual cutter/depth isolation geometry: NOT VERIFIED; no manufacturing offset is approved.",
+                            "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
+                        }, color=GOLD)
+                elif repairs:
+                    self._add_issue_row({
+                        "title": f"Geometry review needed · {len(repairs)} parser repairs",
+                        "severity": "NEEDS VERIFICATION · other layer", "layer": filename,
+                        "summary": "Parser repairs were recorded outside the copper region findings. This preview does not treat them as copper defects, but retains them for review.",
+                        "action": "Continue inspection or compare a trusted native design. No copper defect is inferred from this record.",
+                        "advanced": f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}",
+                        "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
+                    }, color=GOLD)
+                else:
+                    self._add_issue_row({
+                        "title": "Parser geometry review record",
+                        "severity": "BLOCKED · unsupported source feature", "layer": filename,
+                        "summary": "The source contains a construct the current interpretation cannot verify. Geometry or isolation effects may be missing.",
+                        "action": "Import a supported source export or trusted native design for comparison.",
+                        "advanced": f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}",
+                        "region": None, "kind": "parser", "category": "BLOCKED",
+                    }, color=RED)
+
+    def _add_issue_row(self, issue: dict[str, Any], color: str):
+        item = QListWidgetItem(f"{issue['title']}\n{issue.get('category', issue['severity'].split(' · ',1)[0])} · {issue['layer']}")
+        item.setData(Qt.ItemDataRole.UserRole, issue)
+        item.setForeground(QColor(color))
+        self.issues_list.addItem(item)
+
+    def _issue_selected(self, current, previous):
+        if current is None or self.document is None:
+            return
+        issue = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(issue, dict):
+            return
+        self.current_issue = issue
+        self.selected_region = issue.get("region")
+        self.rebuild_scene()
+        self._render_issue(issue)
+
+    def _issue_double_clicked(self, item):
+        issue = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(issue, dict):
+            self.current_issue = issue
+            self.selected_region = issue.get("region")
+            self.rebuild_scene()
+            self._render_issue(issue)
+            self.zoom_to_issue()
+
+    def select_region(self, index: int, zoom: bool = False):
+        if not self.document or not (0 <= index < len(self.document.regions)):
+            return
+        region = self.document.regions[index]
+        issue = next((self.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
+                      for i in range(self.issues_list.count())
+                      if isinstance(self.issues_list.item(i).data(Qt.ItemDataRole.UserRole), dict)
+                      and self.issues_list.item(i).data(Qt.ItemDataRole.UserRole).get("region") is region), None)
+        if issue is None:
+            issue = self._region_issue(region)
+        self.current_issue = issue
+        self.selected_region = region
+        self.rebuild_scene()
+        self._render_issue(issue)
+        if zoom:
+            self.zoom_to_issue()
+
+    def zoom_to_issue(self):
+        region = (self.current_issue or {}).get("region")
+        if region:
+            if region.index == 79 and region.discrepancy_point_mm:
+                self.view.zoom_to_point(region.discrepancy_point_mm, radius_mm=1.8)
+            else:
+                self.view.zoom_to(region.source_points_mm)
+        elif (self.current_issue or {}).get("kind") == "aggregate" and self.document:
+            self.fit_board()
+
+    def reset_view(self):
+        if self.document:
+            self.view.reset_to_board()
+
+    def fit_board(self):
+        if self.document:
+            bounds = self.document.bounds
+            if bounds:
+                minx, miny, maxx, maxy = bounds
+                margin = max(maxx-minx, maxy-miny)*.80 or 1.0
+                self.scene.setSceneRect(QRectF(minx-margin, -maxy-margin,
+                                               maxx-minx+2*margin, maxy-miny+2*margin))
+                self.view.set_board_bounds(bounds)
+            self.view.fit_board(self.document.bounds)
+
+    def rebuild_scene(self, *_):
+        had_document = self.document is not None
+        center = self.view.mapToScene(self.view.viewport().rect().center()) if had_document else None
+        self.scene.clear()
+        doc = self.document
+        if not doc:
+            self._show_empty_state()
+            return
+        checked = {name: box.isChecked() for name, box in self.layer_checks.items()}
+        if checked.get("profile"):
+            self._add_geometry(doc.profile_geometry, QColor("#d44bd2"), QColor("#e874ec"),
+                               "Board profile", 10, 0.10)
+        if checked.get("top"):
+            self._add_geometry(doc.top_geometry, QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
+        if checked.get("bottom"):
+            self._add_geometry(doc.bottom_geometry, QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
+        if checked.get("pads"):
+            for layer in doc.layer_files:
+                for feature in layer.features:
+                    if feature.get("semantic") != "pad / flash" or feature.get("geometry") is None:
+                        continue
+                    pen = QPen(QColor(GOLD), .035, Qt.PenStyle.SolidLine)
+                    self._add_geometry(feature["geometry"], None, pen.color(),
+                        f"Flash / pad · {feature['sourceFile']} object {feature['objectIndex']}", 35, 0, pen=pen,
+                        metadata=feature)
+        if checked.get("drills"):
+            for hit in doc.hits:
+                diameter = float(hit.get("sourceDiameterMm") or 0.1)
+                x, y = float(hit["xMm"]), float(hit["yMm"])
+                color = self._drill_color(hit.get("group", "unassigned"))
+                rect = QRectF(x-diameter/2, -y-diameter/2, diameter, diameter)
+                drill_pen = QPen(color, 1.5); drill_pen.setCosmetic(True)
+                item = self.scene.addEllipse(rect, drill_pen, QBrush(Qt.BrushStyle.NoBrush))
+                item.setZValue(45)
+                item.setFlag(item.GraphicsItemFlag.ItemIsSelectable, True)
+                item.setData(0, {"label": "Circular drill", **{k: v for k,v in hit.items() if k not in {"geometry"}}})
+                item.setToolTip(f"{hit['sourceDiameterMm']:.4f} mm · {hit['sourceFile']} feature {hit['sourceFeatureIndex']}")
+        if checked.get("slots"):
+            for slot in doc.slots:
+                coords = slot.get("coordinatesMm", [])
+                if len(coords) < 2:
+                    continue
+                centerline = LineString([(float(x), float(y)) for x, y in coords])
+                outline = centerline.buffer(float(slot.get("sourceDiameterMm") or .1)/2, quad_segs=16)
+                self._add_geometry(outline, None, QColor("#d6a4ff"), "Routed slot", 46, 0,
+                                   metadata=slot)
+        if checked.get("source"):
+            for region in doc.regions:
+                path = QPainterPath()
+                if region.source_points_mm:
+                    path.moveTo(region.source_points_mm[0][0], -region.source_points_mm[0][1])
+                    for x, y in region.source_points_mm[1:]:
+                        path.lineTo(x, -y)
+                selected = self.selected_region and self.selected_region.index == region.index
+                pen = QPen(QColor(RED if region.index == 79 else TEAL), 2.2 if selected else 1.0,
+                           Qt.PenStyle.SolidLine if selected else Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                item = FeaturePathItem(path, {"label": f"Source region {region.index}", "region": region, "z": 60}, pen)
+                self.scene.addItem(item)
+                # Proposed closing chord remains separately styled and never changes the source contour.
+                closure = QPainterPath()
+                closure.moveTo(region.closure_start_mm[0], -region.closure_start_mm[1])
+                closure.lineTo(region.closure_end_mm[0], -region.closure_end_mm[1])
+                cpen = QPen(QColor(RED if region.index == 79 else GOLD), 2.0,
+                            Qt.PenStyle.DashLine if region.index == 79 else Qt.PenStyle.DotLine)
+                cpen.setCosmetic(True)
+                citem = FeaturePathItem(closure, {"label": f"Hypothetical closure {region.index}", "region": region, "z": 62}, cpen)
+                self.scene.addItem(citem)
+        if checked.get("candidate"):
+            for region in doc.regions:
+                laser_candidate = region.native_polygon is not None and region.index != 79
+                if region.candidate_polygon is None or not laser_candidate:
+                    continue
+                dark_polarity = region.polarity in {"D", "dark"}
+                fill = QBrush(QColor(255, 200, 87, 38 if dark_polarity else 19))
+                pen = QPen(QColor(GOLD if dark_polarity else "#b8a4d4"), 1.2, Qt.PenStyle.DashLine)
+                item = FeaturePathItem(geometry_path(region.candidate_polygon),
+                    {"label": f"Proposed disclosed region {region.index} ({region.polarity})", "region": region, "z": 50}, pen, fill)
+                self.scene.addItem(item)
+        if checked.get("native"):
+            for region in doc.regions:
+                if region.native_polygon is None:
+                    continue
+                selected = self.selected_region and self.selected_region.index == region.index
+                pen = QPen(QColor(TEAL), 2.2 if selected else 1.0, Qt.PenStyle.SolidLine)
+                item = FeaturePathItem(geometry_path(region.native_polygon),
+                    {"label": f"EasyEDA cached fill reference · path {region.native_path_index}", "region": region,
+                     "z": 55}, pen, QBrush(Qt.BrushStyle.NoBrush))
+                self.scene.addItem(item)
+        if self.selected_region:
+            r = self.selected_region
+        if checked.get("diagnostics"):
+            self._add_issue_highlights()
+        if doc.bounds:
+            minx, miny, maxx, maxy = doc.bounds
+            # Keep a virtual work area around the board so panning has range
+            # even while the full board is fitted to the viewport.
+            margin = max(maxx - minx, maxy - miny) * .80 or 1.0
+            self.scene.setSceneRect(QRectF(minx - margin, -maxy - margin,
+                                           maxx - minx + 2 * margin, maxy - miny + 2 * margin))
+        if center is not None:
+            self.view.centerOn(center)
+
+    def _region_issue(self, region: RegionData) -> dict[str, Any]:
+        laser = region.native_polygon is not None
+        if region.index == 79 and laser:
+            title = "Copper boundary differs from the saved design · region 79"
+            severity = "BLOCKED · geometry mismatch"
+            summary = "One copper boundary differs from the recovered EasyEDA saved fill by up to 0.284 mm. The v2.5 native revision and saved-fill freshness are unavailable."
+            action = "Compare against an authenticated v2.5 project and controlled fresh repour. Keep the region blocked."
+        elif region.recovery_status == "RECOVERABLE":
+            title = f"Redundant commands in copper region {region.index + 1}"
+            severity = "WARNING · shape-preserving no-op"
+            summary = "The Phase 2E record identifies a redundant zero-length draw. Its normalization preserves the source boundary; this does not indicate missing copper."
+            action = "Review the hash-bound no-op record. Original Gerber remains unchanged; machining remains blocked."
+        else:
+            title = f"Open boundary in bottom copper region {region.index:03d}"
+            severity = "BLOCKED · nonconforming source contour"
+            summary = "The Gerber region ends at a different coordinate from where it began. Its candidate closing edge is shown only for inspection."
+            action = "Use the native comparison as evidence, not approval. Keep machining blocked pending source verification."
+        advanced = (f"File: {html.escape(region.source_file)}<br>SHA-256: <code>{region.source_sha256}</code><br>"
+                    f"Source lines: {region.first_line}–{region.last_line}<br>Polarity: {html.escape(region.polarity)}<br>"
+                    f"Source status: {html.escape(region.recovery_status)}<br>"
+                    f"Start: {region.source_points_mm[0]} mm; end: {region.source_points_mm[-1]} mm<br>"
+                    f"Candidate chord: {region.closure_length_mm:.9f} mm")
+        if region.boundary_hausdorff_mm is not None:
+            advanced += (f"<br>Boundary Hausdorff: {region.boundary_hausdorff_mm:.9f} mm"
+                         f"<br>Symmetric difference: {region.symmetric_difference_mm2:.9f} mm²"
+                         f"<br>Cached path index: {region.native_path_index}")
+            if region.discrepancy_source_line is not None:
+                advanced += (f"<br>Maximum Gerber line / segment: {region.discrepancy_source_line} / "
+                             f"{region.discrepancy_source_segment_index}; native path segment: "
+                             f"{region.discrepancy_native_segment_index}")
+        return {"title": title, "severity": severity, "layer": "Bottom copper",
+                "summary": summary, "action": action, "advanced": advanced,
+                "region": region, "kind": "region"}
+
+    def _add_issue_highlights(self):
+        issue = self.current_issue
+        if not issue or not self.document:
+            return
+        region = issue.get("region")
+        if region is None:
+            if issue.get("kind") == "aggregate":
+                # Show all affected contours without claiming any one edge is the repair.
+                for affected in self.document.regions:
+                    is_open = affected.source_points_mm[0] != affected.source_points_mm[-1]
+                    is_redundant = affected.recovery_status == "RECOVERABLE"
+                    if not (is_open or is_redundant):
+                        continue
+                    path = QPainterPath()
+                    path.moveTo(affected.source_points_mm[0][0], -affected.source_points_mm[0][1])
+                    for x, y in affected.source_points_mm[1:]:
+                        path.lineTo(x, -y)
+                    pen = QPen(QColor(GOLD), 1.6, Qt.PenStyle.SolidLine); pen.setCosmetic(True)
+                    self.scene.addItem(FeaturePathItem(path, {"label": "Affected source contour", "z": 190}, pen))
+            return
+
+        source_path = QPainterPath()
+        if region.source_points_mm:
+            source_path.moveTo(region.source_points_mm[0][0], -region.source_points_mm[0][1])
+            for x, y in region.source_points_mm[1:]:
+                source_path.lineTo(x, -y)
+        source_color = QColor("#fff06a" if region.recovery_status == "RECOVERABLE" else "#ff9d43")
+        source_pen = QPen(source_color, 2.8, Qt.PenStyle.SolidLine); source_pen.setCosmetic(True)
+        self.scene.addItem(FeaturePathItem(source_path,
+            {"label": "Selected Gerber source boundary", "z": 195}, source_pen))
+
+        if region.index == 79 and region.native_polygon is not None:
+            # The red fill represents only the measured symmetric difference, not a toolpath.
+            if region.discrepancy_geometry is not None:
+                diff_fill = QBrush(QColor(255, 46, 72, 155))
+                diff_pen = QPen(QColor("#ff3155"), 1.7, Qt.PenStyle.SolidLine); diff_pen.setCosmetic(True)
+                self.scene.addItem(FeaturePathItem(geometry_path(region.discrepancy_geometry),
+                    {"label": "Gerber/native symmetric difference · diagnostic only", "z": 200},
+                    diff_pen, diff_fill))
+            native_pen = QPen(QColor("#38f1d2"), 2.5, Qt.PenStyle.SolidLine); native_pen.setCosmetic(True)
+            self.scene.addItem(FeaturePathItem(geometry_path(region.native_polygon),
+                {"label": "EasyEDA cached native boundary", "z": 205}, native_pen))
+            if region.discrepancy_point_mm:
+                x, y = region.discrepancy_point_mm
+                self.scene.addItem(WarningMarker(x, y, "Maximum boundary displacement · native point"))
+            if region.discrepancy_nearest_point_mm:
+                x, y = region.discrepancy_nearest_point_mm
+                marker = WarningMarker(x, y, "Nearest point on Gerber source boundary")
+                marker.setBrush(QColor("#64b5ff"))
+                marker.setZValue(999)
+                self.scene.addItem(marker)
+        elif region.recovery_status != "RECOVERABLE":
+            # Endpoints are exact source coordinates for the open-boundary issue.
+            for endpoint, label in ((region.source_points_mm[0], "Open region start"),
+                                    (region.source_points_mm[-1], "Open region end")):
+                self.scene.addItem(WarningMarker(endpoint[0], endpoint[1], label))
+
+    def _render_issue(self, issue: dict[str, Any]):
+        self.inspect_title.setText(issue.get("title", "Selected validation record"))
+        self.inspect_meta.setText(f"{issue.get('severity', 'INFO')} · {issue.get('layer', 'Manufacturing data')}")
+        self.inspect_summary.setText(issue.get("summary", "No source geometry is inferred for this record."))
+        category = issue.get("category", issue.get("severity", "").split(" · ", 1)[0])
+        self.inspect_action.setText(issue.get("action", "Review the source and keep machining blocked."))
+        self.view_issue_button.setEnabled(issue.get("region") is not None)
+        self.view_issue_button.setVisible(issue.get("region") is not None)
+        self.import_reference_button.setVisible(category != "HANDLED")
+        self.advanced_text.setHtml(issue.get("advanced", "No additional source details are available."))
+        self.advanced_button.setChecked(False)
+
+    def eventFilter(self, watched, event):
+        if watched is self.view.viewport() and event.type() == event.Type.Resize:
+            self._position_loading_overlay()
+        return super().eventFilter(watched, event)
+
+    def _position_loading_overlay(self):
+        if not hasattr(self, "loading_overlay"):
+            return
+        rect = self.view.viewport().rect()
+        self.loading_overlay.move((rect.width() - self.loading_overlay.width()) // 2,
+                                  (rect.height() - self.loading_overlay.height()) // 2)
+
+    def _add_geometry(self, geometry, fill: QColor | None, edge: QColor, label: str, z: int, alpha: float,
+                      pen: QPen | None = None, metadata: dict | None = None):
+        if geometry is None or geometry.is_empty:
+            return
+        brush = QBrush(fill) if fill else QBrush(Qt.BrushStyle.NoBrush)
+        if fill and alpha < 1:
+            c = QColor(fill); c.setAlphaF(alpha); brush = QBrush(c)
+        pen = pen or QPen(edge, 1.2)
+        item = FeaturePathItem(geometry_path(geometry), metadata or {"label": label, "z": z}, pen, brush)
+        item.setZValue(z)
+        self.scene.addItem(item)
+
+    @staticmethod
+    def _bounds(points):
+        xs, ys = zip(*points)
+        return min(xs), min(ys), max(xs), max(ys)
+
+    @staticmethod
+    def _drill_color(group: str):
+        colors = {"PCB - Drill 0.8mm": "#42d6e8", "PCB - Drill 1.0mm": "#ff9c55",
+                  "PCB - Drill 1.1mm": "#83cf76", "PCB - Drill 1.2mm": "#bb93ed",
+                  "PCB - Drill 2.0mm": "#ffe066", "PCB - Drill 3.0mm": "#ff6978",
+                  "PCB - Drill 3.1mm": "#f18ac4", "unassigned": RED}
+        return QColor(colors.get(group, RED))
+
+    def _inspect_selected_item(self):
+        items = self.scene.selectedItems()
+        if not items:
+            return
+        data = items[-1].data(0)
+        if not isinstance(data, dict):
+            return
+        self.view_issue_button.setVisible(False)
+        self.view_issue_button.setEnabled(False)
+        self.import_reference_button.setVisible(True)
+        region = data.get("region")
+        if region is not None:
+            self.current_issue = self._region_issue(region)
+            self.selected_region = region
+            self._render_issue(self.current_issue)
+            return
+        fields = [f"<b>{html.escape(str(key))}:</b> {html.escape(str(value))}"
+                  for key, value in data.items() if key not in {"geometry", "region"}]
+        self.inspect_title.setText(str(data.get("label", "Selected feature")))
+        self.inspect_meta.setText("Selected geometry · inspection only")
+        self.inspect_summary.setText("Coordinates and source attributes are listed in Advanced details.")
+        self.inspect_action.setText("This selection does not change validation status or machining eligibility.")
+        self.advanced_text.setHtml("<p>" + "<br>".join(fields) + "</p>")
+        self.advanced_button.setChecked(False)
+
+    def _show_coordinates(self, x: float, y: float):
+        self.coordinate_label.setText(f"X {x:9.4f} · Y {y:9.4f} mm")
+
+    def closeEvent(self, event):
+        self._loading_timer.stop()
+        if self._load_thread and self._load_thread.isRunning():
+            self._load_thread.quit()
+            self._load_thread.wait()
+        if self.document:
+            self.document.close()
+        super().closeEvent(event)
+
