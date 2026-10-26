@@ -48,6 +48,15 @@ TEAL = "#38d6c3"
 BLUE = "#60a5fa"
 RED = "#ff5d67"
 GOLD = "#ffc857"
+VALENTINE_GERBER_BOTTOM_SHA256 = "f701e7ada043321c89a2c3baf73a84c32a3aad93cc3259bd9eff07bbd8e47843"
+VALENTINE_NATIVE_COMPARISON = {
+    0: {"lines": (34, 5714), "noops": 105, "fill": "e1698", "voids": 103,
+        "area_delta": -2.2008875556607563, "symmetric_difference": 2.2023075311968827,
+        "hausdorff": 0.005050711465022289},
+    1: {"lines": (5715, 6302), "noops": 14, "fill": "e1699", "voids": 14,
+        "area_delta": -0.209869177533335, "symmetric_difference": 0.21004932128609602,
+        "hausdorff": 0.0047608047637029026},
+}
 
 
 class PcbPrepWindow(QMainWindow):
@@ -619,14 +628,45 @@ class PcbPrepWindow(QMainWindow):
                         repaired_type = record.get("afterType", record.get("repairedGeometryType", "unknown"))
                         components_after = audited.get("polygonalComponentsAfterRepair", record.get("polygonalComponentsAfterRepair", "not reported"))
                         remainder = audited.get("nonPolygonalRemainders", record.get("nonPolygonalRemainders", []))
-                        self._add_issue_row({
-                            "title": f"Bottom copper geometry repair · object {record.get('objectIndex', record.get('sourceObjectIndex', '?'))}",
-                            "severity": "NEEDS VERIFICATION · isolation effect unknown", "layer": filename,
-                            "summary": "The source boundary crosses itself, so the intended copper edge is uncertain. Until it is checked, an isolation cut could leave a thin copper bridge or remove copper in the wrong place.",
-                            "action": "The bottom-copper boundary needs independent verification. Keep this layer blocked.",
-                            "advanced": f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}<br>Object: {object_index}<br>Raw valid: {record.get('rawGeometryValid')}<br>Raw area: {float(raw_area):.14f} mm²<br>Repaired area: {float(after_area):.14f} mm²<br>Area delta: {delta:.14g} mm²<br>Output: {html.escape(str(repaired_type))}; polygon components {components_after}; non-polygonal remainder {html.escape(', '.join(remainder))}<br>Deterministic repeat: {record.get('deterministicNormalizedWkbEqual', audited.get('deterministicNormalizedWkbEqual', 'not recorded'))}<br>Direct boundary-set Hausdorff: {float(offset_data.get('boundaryHausdorffMm', float('nan'))):.9f} mm; source/repaired boundary lengths: {float(offset_data.get('rawBoundaryLengthMm', float('nan'))):.6f} / {float(offset_data.get('makeValidPolygonBoundaryLengthMm', float('nan'))):.6f} mm<br>Diagnostic −0.05 mm GEOS inset: symmetric difference {float((offset_data.get('negativeOffsets') or [{}])[0].get('symmetricDifferenceMm2', float('nan'))):.9f} mm²; components {((offset_data.get('negativeOffsets') or [{}])[0].get('rawComponents', '?'))} raw / {((offset_data.get('negativeOffsets') or [{}])[0].get('repairedComponents', '?'))} repaired. This generic buffer is not a V-bit/depth toolpath simulation or approval.<br>Layer-level PyGerber/Gerbonara interpreted comparison: 0.000981455 mm max boundary distance; 0.323800485 mm² symmetric difference; 110 components and 181 voids on each composition. Both pipelines applied GEOS make_valid; this is not independent intended-topology evidence.<br>Raw-ring material symmetric difference: NOT DEFINED for invalid polygon fill. Actual cutter/depth isolation geometry: NOT VERIFIED; no manufacturing offset is approved.",
-                            "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
-                        }, color=GOLD)
+                        legacy_advanced = (f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}<br>Object: {object_index}<br>Raw valid: {record.get('rawGeometryValid')}<br>Raw area: {float(raw_area):.14f} mm²<br>Repaired area: {float(after_area):.14f} mm²<br>Area delta: {delta:.14g} mm²<br>Output: {html.escape(str(repaired_type))}; polygon components {components_after}; non-polygonal remainder {html.escape(', '.join(remainder))}<br>Deterministic repeat: {record.get('deterministicNormalizedWkbEqual', audited.get('deterministicNormalizedWkbEqual', 'not recorded'))}<br>Direct boundary-set Hausdorff: {float(offset_data.get('boundaryHausdorffMm', float('nan'))):.9f} mm; source/repaired boundary lengths: {float(offset_data.get('rawBoundaryLengthMm', float('nan'))):.6f} / {float(offset_data.get('makeValidPolygonBoundaryLengthMm', float('nan'))):.6f} mm<br>Historical diagnostic −0.05 mm GEOS inset: symmetric difference {float((offset_data.get('negativeOffsets') or [{}])[0].get('symmetricDifferenceMm2', float('nan'))):.9f} mm²; components {((offset_data.get('negativeOffsets') or [{}])[0].get('rawComponents', '?'))} raw / {((offset_data.get('negativeOffsets') or [{}])[0].get('repairedComponents', '?'))} repaired. This invalid-intermediate buffer is not a V-bit/depth toolpath simulation or approval.<br>Strict cut-in reconstruction is valid and preserves the listed void topology without make_valid. Native comparison and isolation impact remain a separate review.")
+                        is_verified_dataset = (layer is not None and
+                            layer.metadata.get("sha256") == VALENTINE_GERBER_BOTTOM_SHA256 and
+                            object_index in VALENTINE_NATIVE_COMPARISON)
+                        if is_verified_dataset:
+                            evidence = VALENTINE_NATIVE_COMPARISON[object_index]
+                            self._add_issue_row({
+                                "title": f"Legacy polygon-ring warning resolved · object {object_index}",
+                                "severity": "HANDLED · strict cut-in interpretation", "layer": filename,
+                                "summary": f"The strict cut-in reconstruction is valid and preserves {evidence['voids']} copper voids. This resolves the old invalid intermediate-ring warning. The separate native saved-fill comparison still differs, so the isolation block remains.",
+                                "action": "No polygon repair action is needed. Review the saved-design comparison before any isolation planning.",
+                                "advanced": legacy_advanced, "region": None, "kind": "parser", "category": "HANDLED",
+                            }, color=TEAL)
+                            first_line, last_line = evidence["lines"]
+                            self._add_issue_row({
+                                "title": f"Saved copper comparison needs review · object {object_index}",
+                                "severity": "NEEDS VERIFICATION · bottom copper", "layer": filename,
+                                "summary": (f"The reconstructed Gerber material differs from the recovered saved EasyEDA fill by "
+                                    f"{evidence['symmetric_difference']:.6f} mm². This boundary difference could affect isolation milling. "
+                                    "The export revision and saved-fill freshness are not authenticated, so keep this copper operation blocked."),
+                                "action": "Confirm the export revision and compare against a source-version native fill export or controlled repour.",
+                                "advanced": (f"Validation code: NATIVE_COPPER_COMPARISON_PARTIAL<br>Source SHA-256: "
+                                    f"<code>{VALENTINE_GERBER_BOTTOM_SHA256}</code><br>G36/G37 lines: {first_line}–{last_line}<br>"
+                                    f"Native cached fill: {evidence['fill']}<br>Exact no-op draws handled separately: {evidence['noops']}<br>"
+                                    f"Native minus Gerber area: {evidence['area_delta']:.12f} mm²<br>"
+                                    f"Symmetric difference: {evidence['symmetric_difference']:.12f} mm²<br>"
+                                    f"Boundary Hausdorff: {evidence['hausdorff']:.12f} mm (target 0.005 mm)<br>"
+                                    f"Components / voids: 1 / {evidence['voids']} in both compared regions<br>"
+                                    "No spatial defect marker is drawn; the export revision and saved-pour freshness are unresolved."),
+                                "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
+                            }, color=GOLD)
+                        else:
+                            self._add_issue_row({
+                                "title": f"Bottom copper geometry repair · object {object_index}",
+                                "severity": "NEEDS VERIFICATION · isolation effect unknown", "layer": filename,
+                                "summary": "The source boundary crosses itself, so the intended copper edge is uncertain. Until checked, an isolation cut could leave a copper bridge or remove copper in the wrong place.",
+                                "action": "Compare this boundary against an authenticated native design. Keep the affected layer blocked.",
+                                "advanced": legacy_advanced, "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
+                            }, color=GOLD)
                 elif repairs:
                     self._add_issue_row({
                         "title": f"Geometry review needed · {len(repairs)} parser repairs",

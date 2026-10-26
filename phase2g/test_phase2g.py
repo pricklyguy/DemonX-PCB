@@ -45,11 +45,18 @@ class Phase2GInspectionTests(unittest.TestCase):
             handled_issue = handled_row.data(Qt.ItemDataRole.UserRole)
             self.assertEqual(handled_issue["severity"].split(" · ")[0], "HANDLED")
             self.assertIn("No action is needed", handled_issue["summary"])
-            repair_rows = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
+            legacy_rows = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
                            for i in range(window.issues_list.count())
-                           if "Bottom copper geometry repair" in window.issues_list.item(i).text()]
-            self.assertEqual(len(repair_rows), 2)
-            self.assertTrue(all(x["severity"].startswith("NEEDS VERIFICATION") for x in repair_rows))
+                           if "Legacy polygon-ring warning resolved" in window.issues_list.item(i).text()]
+            comparison_rows = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
+                               for i in range(window.issues_list.count())
+                               if "Saved copper comparison needs review" in window.issues_list.item(i).text()]
+            self.assertEqual(len(legacy_rows), 2)
+            self.assertTrue(all(x["category"] == "HANDLED" for x in legacy_rows))
+            self.assertTrue(all("isolation block remains" in x["summary"] for x in legacy_rows))
+            self.assertEqual(len(comparison_rows), 2)
+            self.assertTrue(all(x["category"] == "NEEDS VERIFICATION" and
+                                "could affect isolation milling" in x["summary"] for x in comparison_rows))
             window.issues_list.setCurrentItem(handled_row)
             self.app.processEvents()
             self.assertFalse(any(isinstance(item.data(0), dict) and

@@ -129,12 +129,15 @@ class Phase2ICorpusTests(unittest.TestCase):
             self.assertIn("safely handled", window.compliance.text())
             issues = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(window.issues_list.count())]
             handled = [x for x in issues if x.get("kind") == "handled"]
-            repairs = [x for x in issues if x.get("category") == "NEEDS VERIFICATION" and "Bottom copper geometry repair" in x["title"]]
+            repairs = [x for x in issues if x.get("category") == "HANDLED" and "Legacy polygon-ring warning resolved" in x["title"]]
+            comparisons = [x for x in issues if x.get("category") == "NEEDS VERIFICATION" and "Saved copper comparison needs review" in x["title"]]
             self.assertEqual(len(handled), 1)
             self.assertEqual(len(repairs), 2)
-            self.assertTrue(all("isolation cut" in x["summary"].lower() for x in repairs))
+            self.assertEqual(len(comparisons), 2)
+            self.assertTrue(all("strict cut-in reconstruction is valid" in x["summary"].lower() for x in repairs))
+            self.assertTrue(all("could affect isolation milling" in x["summary"].lower() for x in comparisons))
             repair_row = next(window.issues_list.item(i) for i in range(window.issues_list.count())
-                              if "Bottom copper geometry repair · object 0" in window.issues_list.item(i).text())
+                              if "Legacy polygon-ring warning resolved · object 0" in window.issues_list.item(i).text())
             window.issues_list.setCurrentItem(repair_row)
             window.advanced_button.setChecked(True)
             self.assertIn("23.174808194", window.advanced_text.toPlainText())

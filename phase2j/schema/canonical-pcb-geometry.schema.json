@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demonx.example/schemas/canonical-pcb-geometry-1.0.schema.json",
+  "title": "DemonX Canonical PCB Geometry",
+  "description": "Draft interchange contract. Geometry is board-frame geometry; no implicit bottom-side mirroring or recovery is permitted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "units", "sourceFiles", "boardCoordinateFrame", "layers", "features", "recovery", "validation", "geometryTolerance", "contentHash"],
+  "properties": {
+    "schemaVersion": {"const": "1.0.0"},
+    "units": {"const": "mm"},
+    "sourceFiles": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceFile"}},
+    "boardCoordinateFrame": {"$ref": "#/$defs/frame"},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+    "features": {"type": "array", "items": {"$ref": "#/$defs/feature"}},
+    "recovery": {"$ref": "#/$defs/recovery"},
+    "validation": {"$ref": "#/$defs/validation"},
+    "geometryTolerance": {"$ref": "#/$defs/tolerance"},
+    "contentHash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "diagnostics": {"type": "array", "items": {"type": "object", "required": ["code", "severity", "message"], "properties": {"code": {"type": "string"}, "severity": {"enum": ["info", "warning", "error", "blocker"]}, "message": {"type": "string"}, "provenance": {"$ref": "#/$defs/provenance"}}}}
+  },
+  "$defs": {
+    "provenance": {"type": "object", "required": ["sourceFileId"], "properties": {"sourceFileId": {"type": "string"}, "sourceLayer": {"type": ["string", "null"]}, "commandRange": {"type": ["array", "null"], "prefixItems": [{"type": "integer", "minimum": 1}, {"type": "integer", "minimum": 1}], "minItems": 2, "maxItems": 2}, "commandDigest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "featureIds": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false},
+    "sourceFile": {"type": "object", "required": ["id", "name", "sha256", "format", "units", "coordinatePrecision"], "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "archiveSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "format": {"enum": ["Gerber X1", "Gerber X2", "Excellon", "native", "other"]}, "units": {"enum": ["mm", "inch", "native"]}, "coordinatePrecision": {"type": "string"}, "sourceRevision": {"type": ["string", "null"]}}, "additionalProperties": false},
+    "frame": {"type": "object", "required": ["name", "origin", "axes", "sideTransforms", "implicitBottomMirror"], "properties": {"name": {"const": "board"}, "origin": {"const": "source-defined"}, "axes": {"const": "right-handed XY in source coordinates"}, "sideTransforms": {"type": "object", "required": ["top", "bottom"], "properties": {"top": {"$ref": "#/$defs/transform"}, "bottom": {"$ref": "#/$defs/transform"}}, "additionalProperties": false}, "implicitBottomMirror": {"const": false}}, "additionalProperties": false},
+    "transform": {"type": "object", "required": ["matrix2x3", "purpose"], "properties": {"matrix2x3": {"type": "array", "prefixItems": [{"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}, {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}], "minItems": 2, "maxItems": 2}, "purpose": {"enum": ["source-registration", "display", "machining-side", "none"]}}, "additionalProperties": false},
+    "layer": {"type": "object", "required": ["name", "semanticName", "function", "side", "polarity", "sourceFileIds", "geometryStatus"], "properties": {"name": {"type": "string"}, "semanticName": {"type": "string"}, "function": {"enum": ["copper", "profile", "drill", "slot", "mask", "legend", "other"]}, "side": {"enum": ["top", "bottom", "both", "none"]}, "polarity": {"enum": ["dark-clear-composed", "dark", "clear", "not-applicable"]}, "sourceFileIds": {"type": "array", "items": {"type": "string"}}, "geometryStatus": {"enum": ["native", "validated-derived", "candidate-only", "blocked"]}}, "additionalProperties": false},
+    "feature": {"type": "object", "required": ["id", "kind", "geometryRole", "provenance"], "properties": {"id": {"type": "string"}, "kind": {"enum": ["line", "arc", "region", "pad", "trace", "copper-material", "drill", "slot", "profile"]}, "geometryRole": {"enum": ["source", "derived-validated", "candidate", "reference"]}, "geometry": {"type": ["object", "null"], "description": "Analytic line/arc/region or polygonal material with explicit interior rings; coordinates are finite board-frame mm."}, "nominalDiameterMm": {"type": ["number", "null"], "exclusiveMinimum": 0}, "originalDiameterMm": {"type": ["number", "null"], "exclusiveMinimum": 0}, "plating": {"enum": ["plated", "non-plated", "unknown", "not-applicable"]}, "provenance": {"$ref": "#/$defs/provenance"}}, "additionalProperties": false},
+    "recovery": {"type": "object", "required": ["status", "policyId", "changes", "arbitrarySnapping"], "properties": {"status": {"enum": ["none", "disclosed", "accepted-with-risk", "blocked"]}, "policyId": {"type": ["string", "null"]}, "changes": {"type": "array", "items": {"type": "object", "required": ["operation", "originalCommandDigest", "derivedGeometryDigest"], "properties": {"operation": {"type": "string"}, "originalCommandDigest": {"type": "string"}, "derivedGeometryDigest": {"type": "string"}, "evidence": {"type": "string"}}}}, "arbitrarySnapping": {"const": false}}, "additionalProperties": false},
+    "validation": {"type": "object", "required": ["sourceConformance", "independentGeometryVerification", "manufacturingEligibility"], "properties": {"sourceConformance": {"enum": ["VALID", "NONCONFORMING", "UNKNOWN"]}, "independentGeometryVerification": {"enum": ["VERIFIED", "PARTIAL", "NOT_VERIFIED"]}, "manufacturingEligibility": {"enum": ["ELIGIBLE", "CONDITIONAL", "BLOCKED"]}, "verificationEvidence": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false},
+    "tolerance": {"type": "object", "required": ["boundaryDeviationMm", "areaDifferenceMm2", "method", "approximationBoundMm"], "properties": {"boundaryDeviationMm": {"type": "number", "minimum": 0}, "areaDifferenceMm2": {"type": "number", "minimum": 0}, "method": {"type": "string"}, "approximationBoundMm": {"type": ["number", "null"], "minimum": 0}}, "additionalProperties": false}
+  }
+}
