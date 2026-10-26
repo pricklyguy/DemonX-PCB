@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 
@@ -23,6 +24,23 @@ def seal(document: dict[str, Any]) -> dict[str, Any]:
     result = dict(document)
     result["contentHash"] = content_hash(result)
     return result
+
+
+def apply_explicit_transform(point: tuple[float, float], transform: dict[str, Any]) -> tuple[float, float]:
+    """Apply a declared 2x3 affine transform; never infer a side mirror or registration."""
+    try:
+        matrix = transform["matrix2x3"]
+        if len(matrix) != 2 or any(len(row) != 3 for row in matrix):
+            raise ValueError
+        values = [float(value) for row in matrix for value in row]
+        x, y = map(float, point)
+    except (KeyError, TypeError, IndexError, ValueError) as exc:
+        raise ValueError("INVALID_EXPLICIT_TRANSFORM") from exc
+    if not all(math.isfinite(value) for value in [*values, x, y]):
+        raise ValueError("NONFINITE_EXPLICIT_TRANSFORM")
+    (a, b, c), (d, e, f) = matrix
+    return (float(a) * x + float(b) * y + float(c),
+            float(d) * x + float(e) * y + float(f))
 
 
 def validate_status_separation(document: dict[str, Any]) -> None:

@@ -21,7 +21,7 @@ Gerber / Excellon / native inputs
 ## 2. Draft artifacts
 
 - JSON Schema: [`../phase2j/schema/canonical-pcb-geometry.schema.json`](../phase2j/schema/canonical-pcb-geometry.schema.json), Draft 2020-12, schema version `1.0.0`.
-- Deterministic serialization and SHA-256 helper: `phase2j/geometry_contract.py`.
+- Deterministic serialization, SHA-256, and explicit affine-transform helper: `phase2j/geometry_contract.py`.
 - Board-derived example payloads are deliberately not committed. Production payloads will be generated from immutable source identities at runtime.
 
 ## 3. Required payload semantics
@@ -64,4 +64,4 @@ No `.dxd` files are emitted by this phase.
 
 ## 5. Validation status
 
-The schema and deterministic envelope helper have Phase 2J unit coverage for serialization identity, hash mismatch, status separation, implicit mirror prohibition, and snapping prohibition. A Draft 2020-12 meta-schema validator is not installed in the project-local runtime; syntax is checked as JSON and schema validation remains an explicit follow-up. No production receiver exists.
+The schema and deterministic envelope helper have Phase 2J unit coverage for serialization identity, hash mismatch, status separation, implicit mirror prohibition, and snapping prohibition. Phase 2K adds explicit matrix application tests and validates the schema against the Draft 2020-12 meta-schema using the project-local `jsonschema==4.25.1` environment. No production receiver exists.
