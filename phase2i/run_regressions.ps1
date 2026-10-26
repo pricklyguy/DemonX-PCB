@@ -12,7 +12,10 @@ $steps = @(
     @{ Name = 'Phase 2E'; Python = 'phase2a\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2e.test_recovery','-v') },
     @{ Name = 'Phase 2F'; Python = 'phase2a\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2f.test_revision','-v') },
     @{ Name = 'Phase 2G / 2H GUI'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2g.test_phase2g','-v') },
-    @{ Name = 'Phase 2I'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2i.test_phase2i_corpus','-v') }
+    @{ Name = 'Phase 2I'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2i.test_phase2i_corpus','-v') },
+    @{ Name = 'Phase 2J'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2j.test_phase2j','-v') },
+    @{ Name = 'Phase 2K'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2k.test_phase2k','-v') },
+    @{ Name = 'Phase 2L'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2l.test_geometry','phase2l.test_preview','-v') }
 )
 
 Push-Location $root
@@ -30,4 +33,4 @@ try {
 } finally {
     Pop-Location
 }
-Write-Output "All Phase 2A–2I regression suites passed. Log: $log"
+Write-Output "All Phase 2A–2L regression suites passed. Log: $log"

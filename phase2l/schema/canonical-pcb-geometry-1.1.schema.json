@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://demonx.example/schemas/canonical-pcb-geometry-1.1.schema.json",
+  "title": "DemonX Canonical PCB Geometry internal envelope 1.1",
+  "description": "Backward-compatible Phase 2L extension. Polygonal material retains holes and islands; source features retain their own provenance. This is not manufacturing authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "units", "boardCoordinateFrame", "layers", "sourceFeatures", "drillFeatures", "validation", "curveApproximation"],
+  "properties": {
+    "schemaVersion": {"const": "1.1.0"},
+    "units": {"const": "mm"},
+    "boardCoordinateFrame": {"$ref": "#/$defs/frame"},
+    "layers": {"type": "array", "items": {"$ref": "#/$defs/layer"}},
+    "sourceFeatures": {"type": "array", "items": {"type": "object", "required": ["sourceFile", "sourceSha256", "objectIndex", "primitiveIndex", "primitiveType", "polarity"], "properties": {"sourceFile": {"type": "string"}, "sourceSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "objectIndex": {"type": "integer", "minimum": 0}, "primitiveIndex": {"type": "integer", "minimum": 0}, "primitiveType": {"type": "string"}, "semantic": {"type": "string"}, "polarity": {"enum": ["dark", "clear"]}, "sourceCoordinatesMm": {"type": "object"}, "polygonizationSagittaMm": {"type": "number", "minimum": 0}, "lineReference": {"type": ["integer", "null"]}}, "additionalProperties": true}},
+    "drillFeatures": {"type": "array", "items": {"type": "object", "required": ["kind", "role"], "properties": {"kind": {"enum": ["circular-hole", "routed-slot"]}, "sourceFile": {"type": ["string", "null"]}, "sourceFeatureIndex": {"type": ["integer", "null"]}, "xMm": {"type": "number"}, "yMm": {"type": "number"}, "centerlineMm": {"type": "array", "items": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "minItems": 2, "maxItems": 2}}, "diameterMm": {"type": ["number", "null"], "exclusiveMinimum": 0}, "plating": {"enum": ["plated", "non-plated", "unknown", "not-applicable"]}, "role": {"enum": ["original", "verified-derived", "hypothetical"]}}, "additionalProperties": false}},
+    "validation": {"$ref": "#/$defs/validation"},
+    "curveApproximation": {"type": "string"},
+    "contentHash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "frame": {"type": "object", "required": ["name", "units", "origin", "axes", "sideTransforms", "implicitBottomMirror"], "properties": {"name": {"type": "string"}, "units": {"const": "mm"}, "origin": {"const": "source-defined"}, "axes": {"const": "right-handed XY in source coordinates"}, "sideTransforms": {"type": "object", "required": ["top", "bottom"], "properties": {"top": {"$ref": "#/$defs/matrix"}, "bottom": {"$ref": "#/$defs/matrix"}}, "additionalProperties": false}, "implicitBottomMirror": {"const": false}}, "additionalProperties": false},
+    "matrix": {"type": "array", "prefixItems": [{"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}, {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}], "minItems": 2, "maxItems": 2},
+    "layer": {"type": "object", "required": ["name", "side", "polarity", "role", "provenance", "wkbHex", "materialGeoJson", "approximationErrorBoundMm"], "properties": {"name": {"type": "string"}, "side": {"enum": ["top", "bottom", "board"]}, "polarity": {"type": "string"}, "role": {"enum": ["original", "verified-derived", "hypothetical"]}, "provenance": {"type": "array", "items": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "minItems": 2, "maxItems": 2}}, "wkbHex": {"type": "string", "pattern": "^([0-9a-fA-F]{2})+$"}, "materialGeoJson": {"type": "object", "required": ["type", "coordinates"]}, "boundsMm": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4}, "approximationErrorBoundMm": {"type": ["number", "null"], "minimum": 0}}, "additionalProperties": false},
+    "validation": {"type": "object", "required": ["sourceConformance", "independentGeometryVerification", "manufacturingEligibility"], "properties": {"sourceConformance": {"enum": ["VALID", "NONCONFORMING", "UNKNOWN"]}, "independentGeometryVerification": {"enum": ["VERIFIED", "PARTIAL", "NOT_VERIFIED"]}, "manufacturingEligibility": {"enum": ["ELIGIBLE", "CONDITIONAL", "BLOCKED"]}}, "additionalProperties": false}
+  }
+}

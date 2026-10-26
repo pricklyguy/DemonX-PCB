@@ -29,6 +29,7 @@ import compare_revision as phase2f  # noqa: E402
 from gerbonara import GerberFile  # noqa: E402
 from shapely.geometry import LineString, Point, Polygon, shape as shape_from_geojson  # noqa: E402
 from shapely.ops import unary_union  # noqa: E402
+from phase2l.geometry import CanonicalGeometry, LayerMaterial  # noqa: E402
 
 MAX_MEMBER_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 500 * 1024 * 1024
@@ -120,6 +121,7 @@ class BoardDocument:
     source_compliance: str
     machining_eligibility: str
     issues: list[str]
+    canonical_geometry: CanonicalGeometry | None = None
 
     @property
     def bounds(self) -> tuple[float, float, float, float] | None:
@@ -418,9 +420,52 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                              else f"WARNING — {strict_issue_count} source region issue(s) in Phase 2E" if strict_issue_count
                              else "No open-region issue detected by this inspection scan")
         eligibility = "BLOCKED — inspection preview only; no manufacturing approval in Phase 2G"
+        layer_materials = []
+        for name, side, geometry in (("top-copper", "top", top),
+                                     ("bottom-copper", "bottom", bottom),
+                                     ("board-profile", "board", profile_geom)):
+            if geometry is None:
+                continue
+            source_rows = tuple(sorted((layer.name, str(layer.metadata.get("sha256", "unknown")))
+                                       for layer in layer_files if layer.kind == side or
+                                       (side == "board" and layer.kind == "profile")))
+            feature_records = [feature for layer in layer_files if layer.kind == side or
+                               (side == "board" and layer.kind == "profile")
+                               for feature in layer.features]
+            error_bounds = [feature.get("polygonizationSagittaMm") for feature in feature_records
+                            if feature.get("polygonizationSagittaMm") is not None]
+            layer_materials.append(LayerMaterial(name, side, "composed", geometry,
+                                                 source_rows, "verified-derived",
+                                                 max(error_bounds) if error_bounds else None))
+        source_features = tuple({key: feature[key] for key in (
+            "sourceFile", "sourceSha256", "objectIndex", "primitiveIndex", "primitiveType",
+            "semantic", "polarity", "sourceCoordinatesMm", "polygonizationSagittaMm", "lineReference")
+            if key in feature}
+            for layer in layer_files if layer.kind in {"top", "bottom", "profile"}
+            for feature in layer.features)
+        drill_features = tuple(
+            {"kind": "circular-hole", "sourceFile": hit.get("sourceFile"),
+             "sourceFeatureIndex": hit.get("sourceFeatureIndex"), "xMm": hit.get("xMm"),
+             "yMm": hit.get("yMm"), "diameterMm": hit.get("sourceDiameterMm"),
+             "plating": hit.get("platingClassification", "unknown"),
+             "role": "original"}
+            for hit in hits) + tuple(
+            {"kind": "routed-slot", "sourceFile": slot.get("sourceFile"),
+             "sourceFeatureIndex": slot.get("sourceFeatureIndex"),
+             "centerlineMm": slot.get("coordinatesMm", []),
+             "diameterMm": slot.get("sourceDiameterMm"),
+             "plating": slot.get("platingClassification", "unknown"),
+             "role": "original"}
+            for slot in slots)
+        canonical = CanonicalGeometry(
+            "mm", "Gerber source-defined right-handed XY", False, tuple(layer_materials),
+            "NONCONFORMING" if open_count else ("UNKNOWN" if strict_issue_count else "VALID"),
+            "PARTIAL", "BLOCKED",
+            "Phase 2A parser tessellation metadata is retained per source feature; source arcs remain in source objects",
+            source_features, drill_features)
         return BoardDocument(archive, archive_hash, board_id, temp, extracted, layer_files, top, bottom,
                              profile_geom, hits, slots, drill_records, regions, native_label,
-                             source_compliance, eligibility, issues)
+                             source_compliance, eligibility, issues, canonical)
     except Exception:
         temp.cleanup()
         raise

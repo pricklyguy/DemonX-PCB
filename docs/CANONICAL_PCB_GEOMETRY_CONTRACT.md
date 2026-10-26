@@ -65,3 +65,11 @@ No `.dxd` files are emitted by this phase.
 ## 5. Validation status
 
 The schema and deterministic envelope helper have Phase 2J unit coverage for serialization identity, hash mismatch, status separation, implicit mirror prohibition, and snapping prohibition. Phase 2K adds explicit matrix application tests and validates the schema against the Draft 2020-12 meta-schema using the project-local `jsonschema==4.25.1` environment. No production receiver exists.
+
+## 6. Phase 2L internal material adapter (additive; draft)
+
+Phase 2L adds an in-process immutable `CanonicalGeometry` view for the existing PCB Prep inspection and the diagnostic isolation prototype. It does not replace, reinterpret, or migrate the Phase 2J 1.0.0 interchange envelope. Existing 1.0.0 producers and consumers remain unchanged. The adapter serializes normalized material WKB and GeoJSON, source feature references, hole/slot records, explicit source-frame transforms, independent statuses, and approximation metadata to a deterministic internal envelope and SHA-256. A separate Draft 2020-12 schema describes that Phase 2L envelope; it is not the future Design/CNC transfer format.
+
+The additive extension proposal for any future external 1.x interchange is to add optional `sourceFeatures`, `drillFeatures`, and per-layer approximation-bound metadata while retaining every existing required 1.0 field and accepting old 1.0 payloads unchanged. A receiver must ignore or preserve unknown optional 1.x fields according to its compatibility policy. A 2.0 schema/version is required before removing or changing any 1.0 field. This proposal is not yet a production transfer contract.
+
+Current limitation: the inspection adapter obtains composed polygon material from the verified Phase 2A parser/composition path. It preserves source primitive type, coordinates, polarity, file hash and tessellation metadata alongside that material, but is not yet a fully analytic line/arc material kernel. Unsupported or unresolved source interpretations continue to block simulation. No snapping, bottom mirror, or guessed closure is introduced.

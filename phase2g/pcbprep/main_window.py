@@ -13,11 +13,14 @@ from PySide6.QtWidgets import (
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QSplitter,
     QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QToolButton,
     QPushButton, QFrame, QScrollArea,
+    QDoubleSpinBox,
 )
 from shapely.geometry import LineString
 
 from .inspection_model import BoardDocument, RegionData, load_archive
 from .view import BoardView, FeaturePathItem, WarningMarker, geometry_path
+from phase2l.geometry import (VBit, eligibility_for_simulation, plan_isolation,
+                              synthetic_canonical_geometry)
 
 
 class ArchiveLoadWorker(QObject):
@@ -73,6 +76,10 @@ class PcbPrepWindow(QMainWindow):
         self.layer_checks: dict[str, QCheckBox] = {}
         self._loading = False
         self._load_succeeded = False
+        self.demo_geometry = None
+        self.demo_canonical = None
+        self.simulation_plan = None
+        self.simulation_enabled = False
         self._spinner_frames = ("|", "/", "—", "\\")
         self._spinner_index = 0
         self._build_ui()
@@ -90,7 +97,23 @@ class PcbPrepWindow(QMainWindow):
         self.valentine_action.triggered.connect(lambda: self.load_sample("valentine"))
         self.laser_action = toolbar.addAction("Sample · Laser Module")
         self.laser_action.triggered.connect(lambda: self.load_sample("laser"))
-        self._load_actions = [self.open_action, self.valentine_action, self.laser_action]
+        self.synthetic_action = toolbar.addAction("Synthetic geometry demo")
+        self.synthetic_action.triggered.connect(self.show_synthetic_demo)
+        self._load_actions = [self.open_action, self.valentine_action, self.laser_action, self.synthetic_action]
+        self.simulation_action = toolbar.addAction("Isolation Simulation — Not Approved for Machining")
+        self.simulation_action.setCheckable(True)
+        self.simulation_action.toggled.connect(self.set_simulation_enabled)
+        self._load_actions.append(self.simulation_action)
+        self.angle_input = QDoubleSpinBox(); self.angle_input.setRange(1.0, 179.0); self.angle_input.setValue(30.0)
+        self.angle_input.setSuffix("°"); self.angle_input.setToolTip("V-bit included angle")
+        self.tip_input = QDoubleSpinBox(); self.tip_input.setRange(0.0, 5.0); self.tip_input.setDecimals(3); self.tip_input.setSingleStep(.025); self.tip_input.setValue(.100)
+        self.tip_input.setSuffix(" mm tip"); self.tip_input.setToolTip("Flat tip diameter")
+        self.depth_input = QDoubleSpinBox(); self.depth_input.setRange(0.0, 2.0); self.depth_input.setDecimals(3); self.depth_input.setSingleStep(.025); self.depth_input.setValue(.100)
+        self.depth_input.setSuffix(" mm depth"); self.depth_input.setToolTip("Engraving depth")
+        toolbar.addWidget(self.angle_input); toolbar.addWidget(self.tip_input); toolbar.addWidget(self.depth_input)
+        self.angle_input.valueChanged.connect(self._update_simulation)
+        self.tip_input.valueChanged.connect(self._update_simulation)
+        self.depth_input.valueChanged.connect(self._update_simulation)
         toolbar.addSeparator()
         fit = toolbar.addAction("Fit board")
         fit.triggered.connect(self.fit_board)
@@ -412,6 +435,11 @@ class PcbPrepWindow(QMainWindow):
         self.advanced_button.setText("Advanced details [hide]" if expanded else "Advanced details [show]")
 
     def load_archive(self, archive: Path):
+        self.demo_geometry = None
+        self.demo_canonical = None
+        self.simulation_plan = None
+        self.simulation_enabled = False
+        self.simulation_action.setChecked(False)
         """Synchronous loader retained for deterministic smoke tests and captures."""
         self.statusBar().showMessage("Reading archive and parsing source manufacturing files…")
         from PySide6.QtWidgets import QApplication
@@ -424,7 +452,84 @@ class PcbPrepWindow(QMainWindow):
             return
         self._install_document(fresh)
 
+    def show_synthetic_demo(self):
+        """Replace the canvas with hand-defined synthetic copper for the preview demo."""
+        self.demo_canonical = synthetic_canonical_geometry()
+        self.demo_geometry = self.demo_canonical.material("top-copper")
+        self.simulation_plan = None
+        self.simulation_enabled = False
+        self.simulation_action.setChecked(False)
+        self.board_title.setText("Synthetic geometry · demo only")
+        self.compliance.setText("Source conformance · VALID · synthetic fixture")
+        self.eligibility.setText("Machining · BLOCKED · synthetic demo only")
+        self.evidence_note.setText(
+            "<b>SYNTHETIC DEMO</b> · independently defined geometry; no user board data. "
+            "Blue = original copper · amber = simulated cutter footprint · yellow = proposed center path · "
+            "red = unsafe clearance / potential copper intrusion."
+        )
+        self.inspect_title.setText("Isolation simulation · synthetic geometry")
+        self.inspect_meta.setText("SYNTHETIC · NOT APPROVED FOR MACHINING")
+        self.inspect_summary.setText(
+            "Hand-defined pads, narrow traces, a via, a copper island with a void, a routed slot, "
+            "a concave outline, and adjacent pads. No manufacturing archive is used."
+        )
+        self.inspect_action.setText(
+            "Adjust the included angle, flat tip diameter, and engraving depth above. Red areas expose "
+            "clearances that do not fit and possible copper removal."
+        )
+        self.view_issue_button.hide()
+        self.import_reference_button.hide()
+        self.layer_tree.clear()
+        self.issues_list.clear()
+        self.statusBar().showMessage("Synthetic geometry loaded. Isolation simulation remains diagnostic only.")
+        self.rebuild_scene()
+
+    def set_simulation_enabled(self, enabled: bool):
+        if not enabled:
+            self.simulation_enabled = False
+            self.simulation_plan = None
+            self.rebuild_scene()
+            return
+        if self.demo_geometry is None:
+            allowed, reason = eligibility_for_simulation(
+                self.document.canonical_geometry if self.document else
+                synthetic_canonical_geometry())
+            self.simulation_action.setChecked(False)
+            self.statusBar().showMessage(reason if not allowed else
+                "Load the explicit synthetic geometry demo to preview isolation simulation.")
+            return
+        self.simulation_enabled = True
+        self._update_simulation()
+
+    def _update_simulation(self, *_):
+        if not self.simulation_enabled or self.demo_geometry is None:
+            return
+        try:
+            cutter = VBit(self.angle_input.value(), self.tip_input.value())
+            self.simulation_plan = plan_isolation(
+                self.demo_geometry, cutter, self.depth_input.value(),
+                approximation_error_bound_mm=0.002)
+        except (ValueError, ArithmeticError) as exc:
+            self.simulation_plan = None
+            self.statusBar().showMessage(f"Simulation unavailable: {exc}")
+            return
+        plan = self.simulation_plan
+        self.statusBar().showMessage(
+            f"{plan.label} · {cutter.included_angle_deg:g}° · tip {cutter.tip_diameter_mm:.3f} mm · "
+            f"depth {plan.depth_mm:.3f} mm · effective cut {plan.effective_width_mm:.3f} mm · "
+            f"centerline offset {plan.centerline_offset_mm:.3f} mm · "
+            f"unfit area {plan.unfit_clearances.area:.4f} mm² · "
+            f"possible copper removal {plan.copper_intrusion.area:.4f} mm² · simulation only")
+        self.rebuild_scene()
+
     def _install_document(self, fresh: BoardDocument):
+        self.demo_geometry = None
+        self.demo_canonical = None
+        self.simulation_enabled = False
+        self.simulation_plan = None
+        self.simulation_action.blockSignals(True)
+        self.simulation_action.setChecked(False)
+        self.simulation_action.blockSignals(False)
         if self.document:
             self.document.close()
         self.document = fresh
@@ -759,17 +864,37 @@ class PcbPrepWindow(QMainWindow):
         center = self.view.mapToScene(self.view.viewport().rect().center()) if had_document else None
         self.scene.clear()
         doc = self.document
+        if self.demo_geometry is not None:
+            self._add_geometry(self.demo_geometry, QColor(BLUE), QColor("#81b9ff"),
+                               "Synthetic original copper · not a board design", 21, .40)
+            if self.simulation_enabled and self.simulation_plan is not None:
+                plan = self.simulation_plan
+                self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
+                                   "Simulated cutting footprint · diagnostic only", 70, .32)
+                self._add_geometry(plan.center_paths, None, QColor("#fff176"),
+                                   "Proposed cutter-center path · not a toolpath", 80, 0)
+                self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor("#ff3155"),
+                                   "Isolation cannot fit · overlapping expanded copper", 90, .75)
+                self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor("#ff0000"),
+                                   "Potential unintended copper removal", 100, .8)
+            minx, miny, maxx, maxy = self.demo_geometry.bounds
+            margin = max(maxx - minx, maxy - miny) * .08 or 1.0
+            self.scene.setSceneRect(QRectF(minx-margin, -maxy-margin,
+                                           maxx-minx+2*margin, maxy-miny+2*margin))
+            self.view.set_board_bounds(self.demo_geometry.bounds)
+            self.view.fit_board(self.demo_geometry.bounds)
+            return
         if not doc:
             self._show_empty_state()
             return
         checked = {name: box.isChecked() for name, box in self.layer_checks.items()}
         if checked.get("profile"):
-            self._add_geometry(doc.profile_geometry, QColor("#d44bd2"), QColor("#e874ec"),
+            self._add_geometry(doc.canonical_geometry.material("board-profile"), QColor("#d44bd2"), QColor("#e874ec"),
                                "Board profile", 10, 0.10)
         if checked.get("top"):
-            self._add_geometry(doc.top_geometry, QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
+            self._add_geometry(doc.canonical_geometry.material("top-copper"), QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
         if checked.get("bottom"):
-            self._add_geometry(doc.bottom_geometry, QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
+            self._add_geometry(doc.canonical_geometry.material("bottom-copper"), QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
         if checked.get("pads"):
             for layer in doc.layer_files:
                 for feature in layer.features:
