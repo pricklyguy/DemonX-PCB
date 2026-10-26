@@ -9,13 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
 from shapely import normalize, to_wkb
-from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon, mapping
+from shapely.geometry import (GeometryCollection, LineString, MultiLineString,
+                              MultiPolygon, Polygon, mapping)
 from shapely.ops import unary_union
 
 MAX_PREVIEW_DEPTH_MM = 2.0
@@ -158,8 +159,50 @@ class IsolationPlan:
     unfit_clearances: Any
     copper_intrusion: Any
     approximation_error_bound_mm: float
+    geometry_uncertainty: Any = GeometryCollection()
+    issues: tuple["IsolationIssue", ...] = ()
     source_role: str = "hypothetical"
     label: str = "Isolation Simulation — Not Approved for Machining"
+
+
+@dataclass(frozen=True)
+class IsolationIssue:
+    category: str
+    cause: str
+    geometry: Any
+    coordinate_mm: tuple[float, float] | None
+    measured_clearance_mm: float | None
+    required_clearance_mm: float
+    effective_cut_width_mm: float
+    raw_area_mm2: float
+
+
+def classify_footprint_overlap(material, footprint, effective_width_mm: float,
+                               approximation_error_bound_mm: float,
+                               machine_epsilon_mm: float = 1e-9):
+    """Separate measured footprint overlap into damage and approximation band.
+
+    No area cutoff is used. The spatial band derives from the declared curve
+    error plus an explicit coordinate epsilon; raw intersection is retained.
+    """
+    raw = footprint.intersection(material)
+    band = material.boundary.buffer(approximation_error_bound_mm + machine_epsilon_mm)
+    uncertainty = raw.intersection(band)
+    damage = raw.difference(band)
+    issues = []
+    if not uncertainty.is_empty:
+        point = uncertainty.representative_point()
+        issues.append(IsolationIssue("geometry uncertainty",
+            "The simulated footprint overlaps copper within the declared polygon approximation band; the raw overlap is retained.",
+            uncertainty, (point.x, point.y), None, effective_width_mm,
+            effective_width_mm, uncertainty.area))
+    if not damage.is_empty:
+        point = damage.representative_point()
+        issues.append(IsolationIssue("potential copper damage",
+            "The simulated cutter footprint enters protected copper beyond the declared approximation band.",
+            damage, (point.x, point.y), None, effective_width_mm,
+            effective_width_mm, damage.area))
+    return damage, uncertainty, tuple(issues)
 
 
 def _polygons(geometry) -> list[Polygon]:
@@ -199,24 +242,38 @@ def plan_isolation(material, cutter: VBit, depth_mm: float, *,
         raise ValueError("APPROXIMATION_ERROR_BOUND_MUST_BE_POSITIVE_MM")
     if not math.isfinite(machine_epsilon_mm) or machine_epsilon_mm < 0:
         raise ValueError("MACHINE_EPSILON_MUST_BE_NONNEGATIVE_MM")
-    if material is None or material.is_empty or not material.is_valid:
+    if material is None or material.is_empty:
+        raise ValueError("ISOLATION_REQUIRES_NONEMPTY_VALID_COPPER_MATERIAL")
+    # Even if callers pass overlapping or just-touching primitive polygons,
+    # compose them before offsets. Same-net identity is unavailable in this
+    # Gerber model, so this is material composition, not electrical-net proof.
+    primitives = _polygons(material)
+    if not primitives:
+        raise ValueError("ISOLATION_REQUIRES_POLYGONAL_COPPER_MATERIAL")
+    material = unary_union(primitives)
+    if material.is_empty or not material.is_valid:
         raise ValueError("ISOLATION_REQUIRES_NONEMPTY_VALID_COPPER_MATERIAL")
     # GEOS uses quad_segs segments per quadrant. Choose enough so circle sagitta
     # is at most the explicit error budget, with a small upper resource guard.
     quad_segs = quad_segments_for_error(radius, approximation_error_bound_mm) if radius else 8
     components = _polygons(material)
     expanded = [component.buffer(radius, quad_segs=quad_segs) for component in components]
-    individual_paths = [geometry.boundary for geometry in expanded if not geometry.is_empty]
-    paths = unary_union(individual_paths) if individual_paths else GeometryCollection()
-    footprint_parts = [path.buffer(radius, quad_segs=quad_segs) for path in individual_paths]
-    footprint = unary_union(footprint_parts) if footprint_parts else GeometryCollection()
     unfit_parts = []
+    issues: list[IsolationIssue] = []
+    uncertainty_limit = 2.0 * approximation_error_bound_mm
     if len(expanded) > 1:
         for i, first in enumerate(expanded):
-            for second in expanded[i+1:]:
+            for j, second in enumerate(expanded[i+1:], start=i+1):
                 overlap = first.intersection(second)
-                if not overlap.is_empty and overlap.area > machine_epsilon_mm ** 2:
+                if not overlap.is_empty:
                     unfit_parts.append(overlap)
+                    clearance = components[i].distance(components[j])
+                    point = overlap.representative_point()
+                    category = ("geometry uncertainty" if abs(width-clearance) <= uncertainty_limit
+                                else "cutter does not fit")
+                    issues.append(IsolationIssue(category,
+                        "Distinct composed copper components are closer than the effective cutter width.",
+                        overlap, (point.x, point.y), clearance, width, width, overlap.area))
     # A vanished void has no offset contour to carry a tool through. Preserve it
     # as an explicit no-fit area rather than silently dropping its center path.
     for original, offset in zip(components, expanded):
@@ -224,14 +281,32 @@ def plan_isolation(material, cutter: VBit, depth_mm: float, *,
             for ring in original.interiors:
                 hole = Polygon(ring)
                 remaining = hole.buffer(-radius, quad_segs=quad_segs)
-                if remaining.is_empty or remaining.area <= machine_epsilon_mm ** 2:
+                if remaining.is_empty:
                     unfit_parts.append(hole)
+                    point = hole.representative_point()
+                    issues.append(IsolationIssue("cutter does not fit",
+                        "The copper void collapses under a half-width inward offset, so its isolation contour cannot pass.",
+                        hole, (point.x, point.y), hole.minimum_clearance * 2 if hasattr(hole, "minimum_clearance") else None,
+                        width, width, hole.area))
     unfit = unary_union(unfit_parts) if unfit_parts else GeometryCollection()
-    intrusion = footprint.intersection(material)
-    if intrusion.area <= machine_epsilon_mm ** 2:
-        intrusion = GeometryCollection()
+    individual_paths = [geometry.boundary for geometry in expanded if not geometry.is_empty]
+    # Keep a separate contour per composed copper component. Do not connect or
+    # trim paths where their cutter envelopes collide: that overlap is a measured
+    # damage diagnostic, and clipping it would hide genuine copper intrusion.
+    # GeometryCollection deliberately preserves component identity at crossings.
+    path_parts = [part for path in individual_paths
+                  for part in (list(path.geoms) if isinstance(path, MultiLineString) else [path])]
+    paths = GeometryCollection(path_parts)
+    footprint_parts = [path.buffer(radius, quad_segs=quad_segs) for path in individual_paths
+                       if not path.is_empty]
+    footprint = unary_union(footprint_parts) if footprint_parts else GeometryCollection()
+    # Keep every measured overlap. Split only by a spatial tolerance derived
+    # from the declared chord error; the raw area remains available either way.
+    damage, uncertainty, overlap_issues = classify_footprint_overlap(
+        material, footprint, width, approximation_error_bound_mm, machine_epsilon_mm)
+    issues.extend(overlap_issues)
     return IsolationPlan(cutter, depth_mm, width, radius, paths, footprint, unfit,
-                         intrusion, approximation_error_bound_mm)
+                         damage, approximation_error_bound_mm, uncertainty, tuple(issues))
 
 
 def synthetic_demo_material():
@@ -252,6 +327,42 @@ def synthetic_demo_material():
         Point(13.22, 0).buffer(.6, quad_segs=48))
     return unary_union([pads, rectangular_pad, trace, via, island, narrow_trace,
                         slot_region, close_pads])
+
+
+def connected_pad_trace_fixture():
+    """Mandatory independent fixture: an overlapping two-pad trace plus a separate close pair."""
+    from shapely.geometry import Point
+    left = Point(0, 0).buffer(.85, quad_segs=96)
+    right = Point(3.2, 0).buffer(.85, quad_segs=96)
+    trace = Polygon([(.65, -.18), (2.55, -.18), (2.55, .18), (.65, .18)])
+    close_a = Point(8, 0).buffer(.6, quad_segs=72)
+    close_b = Point(9.22, 0).buffer(.6, quad_segs=72)
+    # Deliberately return uncomposed primitives as a collection so the planner
+    # must perform layer composition itself.
+    from shapely.geometry import GeometryCollection as GC
+    material = GC([left, right, trace, close_a, close_b])
+    junction_x = math.sqrt(.85**2 - .18**2)
+    return material, ((junction_x, .18), (junction_x, -.18),
+                      (3.2-junction_x, .18), (3.2-junction_x, -.18))
+
+
+def synthetic_connected_canonical_geometry() -> CanonicalGeometry:
+    """Canonical wrapper for the mandatory uncomposed pad/trace fixture."""
+    canonical = synthetic_canonical_geometry()
+    fixture, _ = connected_pad_trace_fixture()
+    layers = tuple(replace(layer, geometry=fixture,
+                           provenance=(("sourceFile", "synthetic-connected-pad-trace"),
+                                       ("sourceSha256", hashlib.sha256(
+                                           b"phase2m-connected-pad-trace-v1").hexdigest())),
+                           role="hypothetical") if layer.name == "top-copper" else layer
+                   for layer in canonical.layers)
+    return replace(canonical, layers=layers,
+                   source_features=tuple({"sourceFile": "synthetic-connected-pad-trace",
+                       "sourceSha256": hashlib.sha256(b"phase2m-connected-pad-trace-v1").hexdigest(),
+                       "primitiveIndex": i, "semantic": semantic, "units": "mm"}
+                       for i, semantic in enumerate(("circular pad A", "circular pad B",
+                                                     "rectangular connecting trace", "separate pad A",
+                                                     "separate pad B"))))
 
 
 def synthetic_canonical_geometry() -> CanonicalGeometry:

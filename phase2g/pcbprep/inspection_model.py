@@ -100,6 +100,7 @@ class RegionData:
     discrepancy_source_line: int | None = None
     discrepancy_source_segment_index: int | None = None
     discrepancy_native_segment_index: int | None = None
+    source_commands: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -288,6 +289,7 @@ def _native_region_evidence(bottom_hash: str, regions: list[dict]) -> tuple[list
         records.append(RegionData(
             index=i, source_file="Gerber_BottomLayer.GBL", source_sha256=bottom_hash,
             first_line=raw["g36Line"], last_line=raw["g37Line"], source_points_mm=points,
+            source_commands=tuple(raw.get("commands", [])),
             closure_start_mm=end, closure_end_mm=start, polarity=polarity, issue=issue,
             candidate_polygon=candidate, native_polygon=native_polygon, native_path_index=native_index,
             boundary_hausdorff_mm=hausdorff, symmetric_difference_mm2=difference,
@@ -396,6 +398,7 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                     regions.append(RegionData(
                         index=i, source_file="Gerber_BottomLayer.GBL", source_sha256=bottom_source_hash,
                         first_line=raw["g36Line"], last_line=raw["g37Line"], source_points_mm=points,
+                        source_commands=tuple(raw.get("commands", [])),
                         closure_start_mm=end, closure_end_mm=start,
                         polarity=audit.get("polarity", "unknown") if audit else "unknown",
                         issue=(f"{audit['status']} — {audit['issueClassification']}" if audit else "BLOCKED — no source-specific evidence"),

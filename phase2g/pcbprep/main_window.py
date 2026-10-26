@@ -8,19 +8,29 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QRectF, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QColor, QBrush, QPen, QPainterPath, QFont, QFontDatabase, QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QGraphicsScene, QGroupBox, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QSplitter,
     QTextBrowser, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QToolButton,
     QPushButton, QFrame, QScrollArea,
     QDoubleSpinBox,
+    QComboBox,
 )
 from shapely.geometry import LineString
 
 from .inspection_model import BoardDocument, RegionData, load_archive
 from .view import BoardView, FeaturePathItem, WarningMarker, geometry_path
 from phase2l.geometry import (VBit, eligibility_for_simulation, plan_isolation,
-                              synthetic_canonical_geometry)
+                              synthetic_canonical_geometry, synthetic_connected_canonical_geometry)
+from phase2m.operations import OPERATIONS, evaluate_operation_status, relevant_to_operation
+from phase2m.repair import (DEFAULT_CLOSURE_TOLERANCE_MM, propose_closure,
+                            approve_proposal)
+from phase2m.visual_style import (COPPER_BLUE, TOOLPATH_AMBER, FOOTPRINT_AMBER,
+                                  COLLISION_RED, UNCERTAINTY_VIOLET,
+                                  proposed_toolpath_pen, selected_toolpath_halo_pen,
+                                  repair_proposal_pen)
 
 
 class ArchiveLoadWorker(QObject):
@@ -80,6 +90,11 @@ class PcbPrepWindow(QMainWindow):
         self.demo_canonical = None
         self.simulation_plan = None
         self.simulation_enabled = False
+        self.operation_key = "copper-isolation"
+        self._all_issue_rows: list[tuple[dict[str, Any], str]] = []
+        self.repair_proposal = None
+        self.approved_repair_layers: list[tuple[Any, dict[str, Any]]] = []
+        self.repair_audit: list[dict[str, Any]] = []
         self._spinner_frames = ("|", "/", "—", "\\")
         self._spinner_index = 0
         self._build_ui()
@@ -99,7 +114,12 @@ class PcbPrepWindow(QMainWindow):
         self.laser_action.triggered.connect(lambda: self.load_sample("laser"))
         self.synthetic_action = toolbar.addAction("Synthetic geometry demo")
         self.synthetic_action.triggered.connect(self.show_synthetic_demo)
-        self._load_actions = [self.open_action, self.valentine_action, self.laser_action, self.synthetic_action]
+        self.connected_demo_action = toolbar.addAction("Connected-pad fixture")
+        self.connected_demo_action.triggered.connect(self.show_connected_pad_demo)
+        self.repair_demo_action = toolbar.addAction("Synthetic repair example")
+        self.repair_demo_action.triggered.connect(self.show_synthetic_repair_example)
+        self._load_actions = [self.open_action, self.valentine_action, self.laser_action,
+                              self.synthetic_action, self.connected_demo_action, self.repair_demo_action]
         self.simulation_action = toolbar.addAction("Isolation Simulation — Not Approved for Machining")
         self.simulation_action.setCheckable(True)
         self.simulation_action.toggled.connect(self.set_simulation_enabled)
@@ -141,6 +161,15 @@ class PcbPrepWindow(QMainWindow):
         subtitle = QLabel("Manufacturing geometry inspection · read-only preview")
         subtitle.setObjectName("subtitle")
         title_col.addWidget(title); title_col.addWidget(subtitle)
+        operation_row = QHBoxLayout()
+        operation_row.addWidget(QLabel("Preparation operation"))
+        self.operation_selector = QComboBox()
+        for key, label in OPERATIONS:
+            self.operation_selector.addItem(label, key)
+        self.operation_selector.currentIndexChanged.connect(self._operation_changed)
+        self.operation_selector.setToolTip("Findings and eligibility are filtered for this preparation operation")
+        operation_row.addWidget(self.operation_selector)
+        title_col.addLayout(operation_row)
         header.addLayout(title_col); header.addStretch(1)
         self.board_title = QLabel("No board loaded")
         self.board_title.setObjectName("boardTitle")
@@ -220,9 +249,25 @@ class PcbPrepWindow(QMainWindow):
         self.evidence_note.setWordWrap(True); self.evidence_note.setObjectName("note")
         self.evidence_note.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.evidence_note)
-        issue_header = QLabel("VALIDATION ISSUES")
-        issue_header.setObjectName("sectionLabel")
-        layout.addWidget(issue_header)
+        tolerance_row = QHBoxLayout()
+        tolerance_row.addWidget(QLabel("Repair gap limit"))
+        self.repair_tolerance_input = QDoubleSpinBox()
+        self.repair_tolerance_input.setRange(.001, 1.0)
+        self.repair_tolerance_input.setDecimals(3)
+        self.repair_tolerance_input.setSingleStep(.005)
+        self.repair_tolerance_input.setValue(DEFAULT_CLOSURE_TOLERANCE_MM)
+        self.repair_tolerance_input.setSuffix(" mm")
+        self.repair_tolerance_input.setToolTip("Review threshold only; a short gap is not proof of intended closure")
+        self.repair_tolerance_input.valueChanged.connect(self._refresh_selected_repair)
+        tolerance_row.addWidget(self.repair_tolerance_input)
+        layout.addLayout(tolerance_row)
+        self.repair_toggle = QCheckBox("Show proposed repair")
+        self.repair_toggle.setChecked(True)
+        self.repair_toggle.stateChanged.connect(self.rebuild_scene)
+        layout.addWidget(self.repair_toggle)
+        self.issue_header = QLabel("COPPER ISOLATION FINDINGS")
+        self.issue_header.setObjectName("sectionLabel")
+        layout.addWidget(self.issue_header)
         self.issues_list = QListWidget()
         self.issues_list.currentItemChanged.connect(self._issue_selected)
         self.issues_list.itemDoubleClicked.connect(self._issue_double_clicked)
@@ -262,10 +307,18 @@ class PcbPrepWindow(QMainWindow):
         self.view_issue_button.clicked.connect(self.zoom_to_issue)
         self.import_reference_button = QPushButton("Open another Gerber ZIP…")
         self.import_reference_button.clicked.connect(self.open_dialog)
+        self.comparison_evidence_button = QPushButton("Open copper comparison report")
+        self.comparison_evidence_button.clicked.connect(self._open_comparison_evidence)
+        self.comparison_evidence_button.hide()
+        self.approve_repair_button = QPushButton("Approve candidate to working layer")
+        self.approve_repair_button.clicked.connect(self._approve_current_repair)
+        self.approve_repair_button.hide()
         self.view_issue_button.setMinimumHeight(34)
         self.import_reference_button.setMinimumHeight(34)
         actions.addWidget(self.view_issue_button)
         actions.addWidget(self.import_reference_button)
+        actions.addWidget(self.comparison_evidence_button)
+        actions.addWidget(self.approve_repair_button)
         layout.addLayout(actions)
         self.advanced_button = QToolButton()
         self.advanced_button.setText("Advanced details [show]")
@@ -459,6 +512,14 @@ class PcbPrepWindow(QMainWindow):
         self.simulation_plan = None
         self.simulation_enabled = False
         self.simulation_action.setChecked(False)
+        self._all_issue_rows.clear()
+        self.issues_list.clear()
+        self._add_issue_row({
+            "title": "Silkscreen mark is outside the board edge", "severity": "WARNING · informational",
+            "layer": "TopSilkScreen", "summary": "This synthetic silkscreen finding is shown in Full archive inspection.",
+            "action": "It does not affect copper isolation. Review it when inspecting the complete archive.",
+            "kind": "parser", "category": "WARNING"}, GOLD)
+        self.current_issue = None
         self.board_title.setText("Synthetic geometry · demo only")
         self.compliance.setText("Source conformance · VALID · synthetic fixture")
         self.eligibility.setText("Machining · BLOCKED · synthetic demo only")
@@ -480,9 +541,70 @@ class PcbPrepWindow(QMainWindow):
         self.view_issue_button.hide()
         self.import_reference_button.hide()
         self.layer_tree.clear()
-        self.issues_list.clear()
         self.statusBar().showMessage("Synthetic geometry loaded. Isolation simulation remains diagnostic only.")
         self.rebuild_scene()
+
+    def show_connected_pad_demo(self):
+        """Load the independent mandatory pad/trace fixture through canonical material."""
+        self.demo_canonical = synthetic_connected_canonical_geometry()
+        self.demo_geometry = self.demo_canonical.material("top-copper")
+        self.simulation_plan = None
+        self.simulation_enabled = False
+        self.simulation_action.setChecked(False)
+        self._all_issue_rows.clear()
+        self.issues_list.clear()
+        self.current_issue = None
+        self.board_title.setText("Connected pads and trace · synthetic fixture")
+        self.compliance.setText("Source conformance · VALID · synthetic fixture")
+        self.eligibility.setText("Machining · BLOCKED · synthetic demo only")
+        self.evidence_note.setText(
+            "<b>SYNTHETIC FIXTURE</b> · two overlapping circular pads, one rectangular trace, "
+            "and two separate close pads. Copper is composed before isolation planning.")
+        self.inspect_title.setText("Connected-pad isolation · demo only")
+        self.inspect_meta.setText("SYNTHETIC · NOT APPROVED FOR MACHINING")
+        self.inspect_summary.setText("The connected pads and trace are one copper component with one exterior isolation contour. The separate close pair remains a genuine clearance diagnostic.")
+        self.inspect_action.setText("Enable Isolation Simulation to inspect the dashed centerline, collision region, and retained uncertainty.")
+        self.view_issue_button.hide()
+        self.import_reference_button.hide()
+        self.layer_tree.clear()
+        self.statusBar().showMessage("Connected-pad synthetic fixture loaded; diagnostic simulation only.")
+        self.rebuild_scene()
+
+    def show_synthetic_repair_example(self):
+        """Show a near-gap repair proposal whose status remains manual review."""
+        self.show_synthetic_demo()
+        points = [(6.0, 6.0), (6.1, 6.0), (6.1, 6.1), (6.0, 6.1), (6.0048, 6.0064)]
+        region = type("SyntheticOpenRegion", (), {})()
+        region.source_points_mm = points
+        region.source_commands = tuple({"line": i + 1, "operation": "D01", "mode": "G01"}
+                                       for i in range(len(points) - 1))
+        region.source_file = "synthetic-open-contour.gbr"
+        region.polarity = "dark"
+        region.boundary_hausdorff_mm = None
+        region.index = 900
+        region.recovery_status = "BLOCKED"
+        region.native_polygon = None
+        region.discrepancy_geometry = None
+        region.discrepancy_point_mm = None
+        region.discrepancy_nearest_point_mm = None
+        region.closure_start_mm = points[0]
+        region.closure_end_mm = points[-1]
+        region.closure_length_mm = ((points[0][0]-points[-1][0])**2 +
+                                    (points[0][1]-points[-1][1])**2) ** .5
+        region.first_line, region.last_line = 1, len(points)
+        region.source_sha256 = "synthetic-demo-only"
+        issue = {"title": "Open contour · synthetic repair example",
+            "severity": "NEEDS MANUAL REVIEW", "category": "NEEDS VERIFICATION",
+            "layer": "Bottom copper", "kind": "region", "region": region,
+            "syntheticRepairExample": True,
+            "summary": "The endpoints are close, but proximity alone cannot confirm the intended contour.",
+            "action": "The violet dashed segment is only a proposal. Review source commands and before/after effects.",
+            "advanced": "Synthetic fixture only; original source is unchanged."}
+        self._add_issue_row(issue, UNCERTAINTY_VIOLET)
+        self.repair_toggle.setChecked(True)
+        self.issues_list.setCurrentRow(self.issues_list.count() - 1)
+        self._issue_selected(self.issues_list.currentItem(), None)
+        self.zoom_to_issue()
 
     def set_simulation_enabled(self, enabled: bool):
         if not enabled:
@@ -514,6 +636,37 @@ class PcbPrepWindow(QMainWindow):
             self.statusBar().showMessage(f"Simulation unavailable: {exc}")
             return
         plan = self.simulation_plan
+        self._all_issue_rows = [(issue, color) for issue, color in self._all_issue_rows
+                                if not issue.get("syntheticDiagnostic")]
+        colors = {"cutter does not fit": RED,
+                  "potential copper damage": RED,
+                  "geometry uncertainty": UNCERTAINTY_VIOLET}
+        titles = {"cutter does not fit": "Cutter does not fit",
+                  "potential copper damage": "Potential copper damage",
+                  "geometry uncertainty": "Geometry uncertainty"}
+        for diagnostic in plan.issues:
+            coordinate = (f" at ({diagnostic.coordinate_mm[0]:.4f}, {diagnostic.coordinate_mm[1]:.4f}) mm"
+                          if diagnostic.coordinate_mm else "")
+            summary = (diagnostic.cause + coordinate +
+                       f" Required clearance {diagnostic.required_clearance_mm:.4f} mm; "
+                       f"measured clearance {diagnostic.measured_clearance_mm:.4f} mm."
+                       if diagnostic.measured_clearance_mm is not None else
+                       diagnostic.cause + coordinate +
+                       f" Effective width {plan.effective_width_mm:.4f} mm; measured overlap "
+                       f"{diagnostic.raw_area_mm2:.8f} mm².")
+            self._add_issue_row({"title": titles[diagnostic.category],
+                "severity": diagnostic.category.upper(), "category": "NEEDS VERIFICATION",
+                "layer": "Bottom copper · simulation", "summary": summary,
+                "action": "Inspect the highlighted synthetic geometry. This is diagnostic only and cannot approve a machining operation.",
+                "advanced": (f"Cause: {html.escape(diagnostic.cause)}<br>Coordinate: {diagnostic.coordinate_mm}<br>"
+                    f"Measured clearance: {diagnostic.measured_clearance_mm}; required: {diagnostic.required_clearance_mm:.9f} mm<br>"
+                    f"Effective width: {diagnostic.effective_cut_width_mm:.9f} mm<br>"
+                    f"Raw measured area: {diagnostic.raw_area_mm2:.12f} mm²; spatial uncertainty band: "
+                    f"{plan.approximation_error_bound_mm:.6f} mm"),
+                "kind": "isolation", "syntheticDiagnostic": True,
+                "isolationGeometry": diagnostic.geometry, "isolationCategory": diagnostic.category},
+                color=colors[diagnostic.category])
+        self._operation_changed(self.operation_selector.currentIndex())
         self.statusBar().showMessage(
             f"{plan.label} · {cutter.included_angle_deg:g}° · tip {cutter.tip_diameter_mm:.3f} mm · "
             f"depth {plan.depth_mm:.3f} mm · effective cut {plan.effective_width_mm:.3f} mm · "
@@ -620,6 +773,7 @@ class PcbPrepWindow(QMainWindow):
     def _populate_issues(self):
         assert self.document
         self.issues_list.clear()
+        self._all_issue_rows.clear()
         doc = self.document
         repair_audit_path = Path(__file__).resolve().parents[2] / "phase2c/results/copper-repair-audit.json"
         try:
@@ -751,9 +905,9 @@ class PcbPrepWindow(QMainWindow):
                                 "title": f"Saved copper comparison needs review · object {object_index}",
                                 "severity": "NEEDS VERIFICATION · bottom copper", "layer": filename,
                                 "summary": (f"The reconstructed Gerber material differs from the recovered saved EasyEDA fill by "
-                                    f"{evidence['symmetric_difference']:.6f} mm². This boundary difference could affect isolation milling. "
-                                    "The export revision and saved-fill freshness are not authenticated, so keep this copper operation blocked."),
-                                "action": "Confirm the export revision and compare against a source-version native fill export or controlled repour.",
+                                    f"{evidence['symmetric_difference']:.6f} mm². February and Export A have identical strict material; rebuilt Export B stays within 0.000010 mm boundary distance. "
+                                    "This cached-fill mismatch does not prove the Gerber is wrong. It remains unresolved, could affect isolation milling, and Gerber reproducibility alone is not independent manufacturing verification. Keep isolation blocked."),
+                                "action": "View this region, open the Phase 2K comparison evidence, then compare against an authenticated source-version native fill or controlled repour.",
                                 "advanced": (f"Validation code: NATIVE_COPPER_COMPARISON_PARTIAL<br>Source SHA-256: "
                                     f"<code>{VALENTINE_GERBER_BOTTOM_SHA256}</code><br>G36/G37 lines: {first_line}–{last_line}<br>"
                                     f"Native cached fill: {evidence['fill']}<br>Exact no-op draws handled separately: {evidence['noops']}<br>"
@@ -761,8 +915,11 @@ class PcbPrepWindow(QMainWindow):
                                     f"Symmetric difference: {evidence['symmetric_difference']:.12f} mm²<br>"
                                     f"Boundary Hausdorff: {evidence['hausdorff']:.12f} mm (target 0.005 mm)<br>"
                                     f"Components / voids: 1 / {evidence['voids']} in both compared regions<br>"
-                                    "No spatial defect marker is drawn; the export revision and saved-pour freshness are unresolved."),
-                                "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
+                                    "Phase 2K: February and Export A strict material are identical; Export B's maximum boundary displacement is 0.000010 mm.<br>"
+                                    "This is a native cached-fill correspondence question, not proof of an invalid Gerber. Native project revision/fill freshness and independent geometry verification remain unresolved."),
+                                "region": doc.regions[object_index] if object_index < len(doc.regions) else None,
+                                "kind": "comparison", "comparisonEvidenceFile": "PHASE2K_EASYEDA_EXPORT_RECONCILIATION_REPORT.md",
+                                "category": "NEEDS VERIFICATION",
                             }, color=GOLD)
                         else:
                             self._add_issue_row({
@@ -781,6 +938,7 @@ class PcbPrepWindow(QMainWindow):
                         "advanced": f"Validation code: PHASE2A_GEOMETRY_DIAGNOSTIC<br>{detail}",
                         "region": None, "kind": "parser", "category": "NEEDS VERIFICATION",
                     }, color=GOLD)
+
                 else:
                     self._add_issue_row({
                         "title": "Parser geometry review record",
@@ -791,30 +949,128 @@ class PcbPrepWindow(QMainWindow):
                         "region": None, "kind": "parser", "category": "BLOCKED",
                     }, color=RED)
 
+        unassigned_hits = [hit for hit in doc.hits if hit.get("group") == "unassigned"]
+        if unassigned_hits:
+            self._add_issue_row({
+                "title": f"{len(unassigned_hits)} drill holes need a tool assignment",
+                "severity": "NEEDS VERIFICATION · drilling setup", "layer": "Drill files",
+                "summary": "These holes retain their original diameters, but PCB Prep has not assigned a drill tool. That affects drilling setup only.",
+                "action": "Review the listed hole diameters and assign a suitable drill before drilling.",
+                "advanced": "<br>".join(f"{hit.get('sourceFile')} · {hit.get('sourceDiameterMm')} mm · feature {hit.get('sourceFeatureIndex')}"
+                                              for hit in unassigned_hits),
+                "kind": "drill", "category": "NEEDS VERIFICATION"}, color=GOLD)
+        profile = doc.canonical_geometry.material("board-profile") if doc.canonical_geometry else None
+        if profile is None or profile.is_empty or not profile.is_valid:
+            self._add_issue_row({
+                "title": "Board outline is missing or invalid", "severity": "BLOCKED · outline geometry",
+                "layer": "Board profile", "summary": "The profile cannot be prepared for outline cutting from the current geometry.",
+                "action": "Check the profile layer and import a supported, closed outline.",
+                "kind": "profile", "category": "BLOCKED"}, color=RED)
+        self._operation_changed(self.operation_selector.currentIndex())
+
     def _add_issue_row(self, issue: dict[str, Any], color: str):
+        self._all_issue_rows.append((issue, color))
+        if not relevant_to_operation(issue, self.operation_key):
+            return
+        self._append_issue_widget(issue, color)
+
+    def _append_issue_widget(self, issue: dict[str, Any], color: str):
         item = QListWidgetItem(f"{issue['title']}\n{issue.get('category', issue['severity'].split(' · ',1)[0])} · {issue['layer']}")
         item.setData(Qt.ItemDataRole.UserRole, issue)
         item.setForeground(QColor(color))
         self.issues_list.addItem(item)
 
+    def _operation_changed(self, index: int):
+        if not hasattr(self, "operation_selector"):
+            return
+        key = self.operation_selector.itemData(index) or "copper-isolation"
+        self.operation_key = key
+        labels = dict(OPERATIONS)
+        if hasattr(self, "issue_header"):
+            short_label = "FULL ARCHIVE" if key == "full-archive" else labels[key]
+            self.issue_header.setText(short_label.upper() + " FINDINGS")
+        self.issues_list.blockSignals(True)
+        self.issues_list.clear()
+        for issue, color in self._all_issue_rows:
+            if relevant_to_operation(issue, key):
+                self._append_issue_widget(issue, color)
+        self.issues_list.blockSignals(False)
+        self._update_operation_status()
+        if self.issues_list.count() == 0 and self.document:
+            self.inspect_title.setText(labels[key] + " · no relevant findings")
+            self.inspect_meta.setText("No unrelated-layer warning is blocking this operation.")
+            self.inspect_summary.setText("This operation still requires independent geometry verification and a separate machining review.")
+            self.inspect_action.setText("Source conformance remains unchanged. No production toolpaths are available in Phase 2M.")
+
+    def _update_operation_status(self):
+        if not self.document or not self.document.canonical_geometry:
+            return
+        status = evaluate_operation_status(
+            self.operation_key, [issue for issue, _ in self._all_issue_rows],
+            source_conformance=self.document.canonical_geometry.source_conformance,
+            independent_verification=self.document.canonical_geometry.independent_verification)
+        label = dict(OPERATIONS).get(self.operation_key, self.operation_key)
+        self.eligibility.setText(f"{label} · {status.status}")
+
+    def _open_comparison_evidence(self):
+        report = Path(__file__).resolve().parents[2] / "docs/PHASE2K_EASYEDA_EXPORT_RECONCILIATION_REPORT.md"
+        if report.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(report)))
+        else:
+            self.statusBar().showMessage("The local Phase 2K comparison report is not available on this workstation.")
+
+    def _build_repair_proposal(self, region):
+        if not region or len(region.source_points_mm) < 3 or region.source_points_mm[0] == region.source_points_mm[-1]:
+            return None
+        material = (self.document.canonical_geometry.material("bottom-copper")
+                    if self.document and self.document.canonical_geometry else None)
+        return propose_closure(
+            region.source_points_mm, source_commands=region.source_commands,
+            source_layer=region.source_file, polarity=region.polarity,
+            tolerance_mm=self.repair_tolerance_input.value(), source_role="original",
+            source_material=material, protected_geometry=material,
+            native_boundary_mismatch_mm=region.boundary_hausdorff_mm)
+
+    def _refresh_selected_repair(self, *_):
+        if not self.current_issue or not self.current_issue.get("region"):
+            return
+        self._render_issue(self.current_issue)
+        self.rebuild_scene()
+
+    def _approve_current_repair(self):
+        proposal = self.repair_proposal
+        if proposal is None or proposal.status != "SAFE CANDIDATE":
+            self.statusBar().showMessage("Only a reviewed Safe Candidate can be approved to a separate working layer.")
+            return
+        geometry, audit = approve_proposal(proposal, explicit_approval=True)
+        self.approved_repair_layers.append((geometry, audit))
+        self.repair_audit.append(audit)
+        audit_path = Path(__file__).resolve().parents[2] / "phase2m/results/repair-audit.json"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(json.dumps(self.repair_audit, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":"), allow_nan=False), encoding="utf-8")
+        self.statusBar().showMessage("Reviewed closure added to the separate working layer; original Gerber and machining status are unchanged.")
+        self.rebuild_scene()
+
     def _issue_selected(self, current, previous):
-        if current is None or self.document is None:
+        if current is None or (self.document is None and self.demo_geometry is None):
             return
         issue = current.data(Qt.ItemDataRole.UserRole)
         if not isinstance(issue, dict):
             return
         self.current_issue = issue
         self.selected_region = issue.get("region")
-        self.rebuild_scene()
         self._render_issue(issue)
+        self.rebuild_scene()
+        self.zoom_to_issue()
 
     def _issue_double_clicked(self, item):
         issue = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(issue, dict):
             self.current_issue = issue
             self.selected_region = issue.get("region")
-            self.rebuild_scene()
             self._render_issue(issue)
+            self.rebuild_scene()
             self.zoom_to_issue()
 
     def select_region(self, index: int, zoom: bool = False):
@@ -835,12 +1091,15 @@ class PcbPrepWindow(QMainWindow):
             self.zoom_to_issue()
 
     def zoom_to_issue(self):
-        region = (self.current_issue or {}).get("region")
+        issue = self.current_issue or {}
+        region = issue.get("region")
         if region:
             if region.index == 79 and region.discrepancy_point_mm:
                 self.view.zoom_to_point(region.discrepancy_point_mm, radius_mm=1.8)
             else:
                 self.view.zoom_to(region.source_points_mm)
+        elif issue.get("isolationGeometry") is not None and not issue["isolationGeometry"].is_empty:
+            self.view.zoom_to_bounds(issue["isolationGeometry"].bounds, padding_ratio=.5)
         elif (self.current_issue or {}).get("kind") == "aggregate" and self.document:
             self.fit_board()
 
@@ -871,12 +1130,46 @@ class PcbPrepWindow(QMainWindow):
                 plan = self.simulation_plan
                 self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
                                    "Simulated cutting footprint · diagnostic only", 70, .32)
-                self._add_geometry(plan.center_paths, None, QColor("#fff176"),
-                                   "Proposed cutter-center path · not a toolpath", 80, 0)
-                self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor("#ff3155"),
+                selected_isolation = bool(self.current_issue and self.current_issue.get("syntheticDiagnostic"))
+                if selected_isolation:
+                    halo = FeaturePathItem(geometry_path(plan.center_paths),
+                        {"label": "Selected proposed cutter-center path", "z": 79},
+                        selected_toolpath_halo_pen())
+                    self.scene.addItem(halo)
+                self._add_geometry(plan.center_paths, None, QColor(TOOLPATH_AMBER),
+                                   "Proposed cutter-center path · not a toolpath", 80, 0,
+                                   pen=proposed_toolpath_pen(selected=selected_isolation))
+                self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor(COLLISION_RED),
                                    "Isolation cannot fit · overlapping expanded copper", 90, .75)
-                self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor("#ff0000"),
+                self._add_geometry(plan.geometry_uncertainty, QColor(188, 140, 255, 110), QColor(UNCERTAINTY_VIOLET),
+                                   "Geometry uncertainty · retained offset overlap", 95, .60)
+                self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor(COLLISION_RED),
                                    "Potential unintended copper removal", 100, .8)
+                if self.current_issue and self.current_issue.get("isolationGeometry") is not None:
+                    self._add_geometry(self.current_issue["isolationGeometry"], None, QColor("#ffffff"),
+                                       "Selected diagnostic geometry", 110, 0,
+                                       pen=QPen(QColor("#ffffff"), 2.5, Qt.PenStyle.SolidLine))
+            if self.current_issue and self.current_issue.get("syntheticRepairExample"):
+                region = self.current_issue["region"]
+                source = QPainterPath()
+                source.moveTo(region.source_points_mm[0][0], -region.source_points_mm[0][1])
+                for x, y in region.source_points_mm[1:]:
+                    source.lineTo(x, -y)
+                source_pen = QPen(QColor("#ff9d43"), 2.0, Qt.PenStyle.SolidLine)
+                source_pen.setCosmetic(True)
+                self.scene.addItem(FeaturePathItem(source,
+                    {"label": "Synthetic original open contour", "z": 195}, source_pen))
+                proposal = self.current_issue.get("repairProposal")
+                if proposal is not None and self.repair_toggle.isChecked():
+                    repair_path = QPainterPath()
+                    repair_path.moveTo(proposal.end_mm[0], -proposal.end_mm[1])
+                    repair_path.lineTo(proposal.start_mm[0], -proposal.start_mm[1])
+                    self.scene.addItem(FeaturePathItem(repair_path,
+                        {"label": f"Hypothetical closure · {proposal.status}", "z": 215,
+                         "repairProposal": proposal}, repair_proposal_pen(selected=True)))
+            for repaired, audit in self.approved_repair_layers:
+                self._add_geometry(repaired, QColor(UNCERTAINTY_VIOLET), QColor("#e7c8ff"),
+                                   "Reviewed derived working geometry · source unchanged", 120, .45)
             minx, miny, maxx, maxy = self.demo_geometry.bounds
             margin = max(maxx - minx, maxy - miny) * .08 or 1.0
             self.scene.setSceneRect(QRectF(minx-margin, -maxy-margin,
@@ -895,6 +1188,9 @@ class PcbPrepWindow(QMainWindow):
             self._add_geometry(doc.canonical_geometry.material("top-copper"), QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
         if checked.get("bottom"):
             self._add_geometry(doc.canonical_geometry.material("bottom-copper"), QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
+        for repaired, audit in self.approved_repair_layers:
+            self._add_geometry(repaired, QColor(UNCERTAINTY_VIOLET), QColor("#e7c8ff"),
+                               "Reviewed derived working geometry · source unchanged", 50, .45)
         if checked.get("pads"):
             for layer in doc.layer_files:
                 for feature in layer.features:
@@ -1018,11 +1314,11 @@ class PcbPrepWindow(QMainWindow):
 
     def _add_issue_highlights(self):
         issue = self.current_issue
-        if not issue or not self.document:
+        if not issue:
             return
         region = issue.get("region")
         if region is None:
-            if issue.get("kind") == "aggregate":
+            if issue.get("kind") == "aggregate" and self.document:
                 # Show all affected contours without claiming any one edge is the repair.
                 for affected in self.document.regions:
                     is_open = affected.source_points_mm[0] != affected.source_points_mm[-1]
@@ -1037,6 +1333,9 @@ class PcbPrepWindow(QMainWindow):
                     self.scene.addItem(FeaturePathItem(path, {"label": "Affected source contour", "z": 190}, pen))
             return
 
+        if not self.document:
+            return
+
         source_path = QPainterPath()
         if region.source_points_mm:
             source_path.moveTo(region.source_points_mm[0][0], -region.source_points_mm[0][1])
@@ -1047,13 +1346,28 @@ class PcbPrepWindow(QMainWindow):
         self.scene.addItem(FeaturePathItem(source_path,
             {"label": "Selected Gerber source boundary", "z": 195}, source_pen))
 
-        if region.index == 79 and region.native_polygon is not None:
-            # The red fill represents only the measured symmetric difference, not a toolpath.
-            if region.discrepancy_geometry is not None:
+        proposal = issue.get("repairProposal")
+        if proposal is not None and self.repair_toggle.isChecked():
+            repair_path = QPainterPath()
+            repair_path.moveTo(proposal.end_mm[0], -proposal.end_mm[1])
+            repair_path.lineTo(proposal.start_mm[0], -proposal.start_mm[1])
+            self.scene.addItem(FeaturePathItem(repair_path,
+                {"label": f"Hypothetical closure · {proposal.status}", "z": 215,
+                 "repairProposal": proposal}, repair_proposal_pen(selected=True)))
+
+        if region.native_polygon is not None and (region.index == 79 or issue.get("kind") == "comparison"):
+            # Red is a display-only fill comparison, never a cutter or repair path.
+            overlay = region.discrepancy_geometry
+            overlay_label = "Gerber/native symmetric difference · diagnostic only"
+            if (issue.get("kind") == "comparison" and region.candidate_polygon is not None and
+                    region.candidate_polygon.is_valid and region.native_polygon.is_valid):
+                overlay = region.candidate_polygon.symmetric_difference(region.native_polygon)
+                overlay_label = "Proposed Gerber fill vs cached native fill · diagnostic only"
+            if overlay is not None and not overlay.is_empty:
                 diff_fill = QBrush(QColor(255, 46, 72, 155))
                 diff_pen = QPen(QColor("#ff3155"), 1.7, Qt.PenStyle.SolidLine); diff_pen.setCosmetic(True)
-                self.scene.addItem(FeaturePathItem(geometry_path(region.discrepancy_geometry),
-                    {"label": "Gerber/native symmetric difference · diagnostic only", "z": 200},
+                self.scene.addItem(FeaturePathItem(geometry_path(overlay),
+                    {"label": overlay_label, "z": 200},
                     diff_pen, diff_fill))
             native_pen = QPen(QColor("#38f1d2"), 2.5, Qt.PenStyle.SolidLine); native_pen.setCosmetic(True)
             self.scene.addItem(FeaturePathItem(geometry_path(region.native_polygon),
@@ -1074,14 +1388,39 @@ class PcbPrepWindow(QMainWindow):
                 self.scene.addItem(WarningMarker(endpoint[0], endpoint[1], label))
 
     def _render_issue(self, issue: dict[str, Any]):
+        region = issue.get("region")
+        self.repair_proposal = self._build_repair_proposal(region) if region else None
+        if self.repair_proposal is not None:
+            issue["repairProposal"] = self.repair_proposal
+            proposal = self.repair_proposal
+            issue.setdefault("_baseSummary", issue.get("summary", ""))
+            issue.setdefault("_baseAction", issue.get("action", ""))
+            issue.setdefault("_baseAdvanced", issue.get("advanced", ""))
+            issue["summary"] = (issue["_baseSummary"] +
+                f" Repair check: {proposal.status.lower()} — {proposal.reason}")
+            issue["action"] = (issue["_baseAction"] +
+                " The violet line is a hypothetical straight closure; inspect it before considering a separate working-layer change.")
+            issue["advanced"] = (issue["_baseAdvanced"] +
+                f"<br>Repair candidate gap: {proposal.gap_mm:.9f} mm; selected limit: {proposal.tolerance_mm:.3f} mm"
+                f"<br>Classification: {html.escape(proposal.status)} · {html.escape(proposal.reason)}"
+                f"<br>Contour direction: {proposal.contour_direction}; nearest protected copper: "
+                f"{proposal.nearest_geometry_distance_mm} mm"
+                f"<br>Before: {proposal.before_metrics}; after candidate: {proposal.after_metrics}"
+                f"<br>Source command context: {html.escape(str(proposal.source_command_context))}"
+                f"<br>Audit SHA-256: <code>{proposal.audit_record['sha256']}</code>")
         self.inspect_title.setText(issue.get("title", "Selected validation record"))
         self.inspect_meta.setText(f"{issue.get('severity', 'INFO')} · {issue.get('layer', 'Manufacturing data')}")
         self.inspect_summary.setText(issue.get("summary", "No source geometry is inferred for this record."))
         category = issue.get("category", issue.get("severity", "").split(" · ", 1)[0])
         self.inspect_action.setText(issue.get("action", "Review the source and keep machining blocked."))
-        self.view_issue_button.setEnabled(issue.get("region") is not None)
-        self.view_issue_button.setVisible(issue.get("region") is not None)
+        has_geometry = (issue.get("region") is not None or
+                        issue.get("isolationGeometry") is not None)
+        self.view_issue_button.setEnabled(has_geometry)
+        self.view_issue_button.setVisible(has_geometry)
         self.import_reference_button.setVisible(category != "HANDLED")
+        self.comparison_evidence_button.setVisible(bool(issue.get("comparisonEvidenceFile")))
+        self.approve_repair_button.setVisible(bool(self.repair_proposal and self.repair_proposal.status == "SAFE CANDIDATE"))
+        self.approve_repair_button.setEnabled(self.approve_repair_button.isVisible())
         self.advanced_text.setHtml(issue.get("advanced", "No additional source details are available."))
         self.advanced_button.setChecked(False)
 

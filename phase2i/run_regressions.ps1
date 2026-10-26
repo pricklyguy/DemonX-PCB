@@ -15,7 +15,8 @@ $steps = @(
     @{ Name = 'Phase 2I'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2i.test_phase2i_corpus','-v') },
     @{ Name = 'Phase 2J'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2j.test_phase2j','-v') },
     @{ Name = 'Phase 2K'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2k.test_phase2k','-v') },
-    @{ Name = 'Phase 2L'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2l.test_geometry','phase2l.test_preview','-v') }
+    @{ Name = 'Phase 2L'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2l.test_geometry','phase2l.test_preview','-v') },
+    @{ Name = 'Phase 2M'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2m.test_workflow','phase2m.test_launcher','-v') }
 )
 
 Push-Location $root
@@ -33,4 +34,4 @@ try {
 } finally {
     Pop-Location
 }
-Write-Output "All Phase 2A–2L regression suites passed. Log: $log"
+Write-Output "All Phase 2A–2M regression suites passed. Log: $log"
