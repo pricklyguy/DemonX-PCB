@@ -114,6 +114,7 @@ class PrivateCompatibilityTests(unittest.TestCase):
 
     def test_actual_case_highlights_omit_covered_edge_and_keep_surviving_portions(self):
         w = self.window
+        w.layer_checks["inferred"].setChecked(True)
         cases = self.report['caseIndices']
         for index in cases:
             r = w.document.regions[index]
@@ -121,6 +122,10 @@ class PrivateCompatibilityTests(unittest.TestCase):
             self.assertAlmostEqual(r.surviving_closure.length, expected, places=9)
             labels = [item.data(0).get('label','') for item in w.scene.items() if isinstance(item.data(0), dict)]
             self.assertEqual(any(label.startswith(f'Inferred closing segment {index} ·') for label in labels), expected > 0)
+        w.layer_checks["inferred"].setChecked(False)
+        labels = [item.data(0).get('label','') for item in w.scene.items() if isinstance(item.data(0), dict)]
+        self.assertFalse(any(label.startswith('Inferred closing segment ') or
+                             label.startswith('Hypothetical closure ') for label in labels))
 
     def test_unknown_bottom_conversions_still_refuse_preview(self):
         w = self.window

@@ -24,6 +24,8 @@ from .inspection_model import BoardDocument, RegionData, load_archive
 from .view import BoardView, FeaturePathItem, WarningMarker, geometry_path
 from phase2l.geometry import (VBit, eligibility_for_simulation, plan_isolation,
                               synthetic_canonical_geometry, synthetic_connected_canonical_geometry)
+from phase2o.isolation import (identify_residual_candidates, plan_selective_clearing,
+                               plan_two_pass)
 from phase2m.operations import OPERATIONS, evaluate_operation_status, relevant_to_operation
 from phase2m.repair import (DEFAULT_CLOSURE_TOLERANCE_MM, propose_closure,
                             approve_proposal)
@@ -89,6 +91,10 @@ class PcbPrepWindow(QMainWindow):
         self.demo_geometry = None
         self.demo_canonical = None
         self.simulation_plan = None
+        self.multipass_plan = None
+        self.clearing_plan = None
+        self.residual_candidates = ()
+        self._refreshing_residuals = False
         self.simulation_enabled = False
         self.operation_key = "copper-isolation"
         self._all_issue_rows: list[tuple[dict[str, Any], str]] = []
@@ -134,6 +140,21 @@ class PcbPrepWindow(QMainWindow):
         self.angle_input.valueChanged.connect(self._update_simulation)
         self.tip_input.valueChanged.connect(self._update_simulation)
         self.depth_input.valueChanged.connect(self._update_simulation)
+        self.strategy_selector = QComboBox()
+        self.strategy_selector.addItem("Single pass", "single")
+        self.strategy_selector.addItem("Two passes", "two")
+        self.strategy_selector.addItem("Selective clearing", "clear")
+        self.strategy_selector.setToolTip("Diagnostic strategy only; does not authorize manufacturing")
+        self.strategy_selector.currentIndexChanged.connect(self._update_simulation)
+        self.second_offset_input = QDoubleSpinBox()
+        self.second_offset_input.setRange(.005, 1.0)
+        self.second_offset_input.setDecimals(3)
+        self.second_offset_input.setSingleStep(.025)
+        self.second_offset_input.setValue(.200)
+        self.second_offset_input.setSuffix(" mm extra")
+        self.second_offset_input.setToolTip("Pass 2 cutter-center distance beyond pass 1; not total removed width")
+        self.second_offset_input.hide()
+        self.second_offset_input.valueChanged.connect(self._update_simulation)
         toolbar.addSeparator()
         fit = toolbar.addAction("Fit board")
         fit.triggered.connect(self.fit_board)
@@ -169,6 +190,10 @@ class PcbPrepWindow(QMainWindow):
         self.operation_selector.currentIndexChanged.connect(self._operation_changed)
         self.operation_selector.setToolTip("Findings and eligibility are filtered for this preparation operation")
         operation_row.addWidget(self.operation_selector)
+        operation_row.addSpacing(12)
+        operation_row.addWidget(QLabel("Isolation strategy"))
+        operation_row.addWidget(self.strategy_selector)
+        operation_row.addWidget(self.second_offset_input)
         title_col.addLayout(operation_row)
         header.addLayout(title_col); header.addStretch(1)
         self.board_title = QLabel("No board loaded")
@@ -239,11 +264,24 @@ class PcbPrepWindow(QMainWindow):
             ("source", "Source contours", True), ("candidate", "Proposed regions", True),
             ("native", "Native fill boundary", False),
             ("diagnostics", "Highlight issue", True),
+            ("pass1", "Pass 1 centerline", True),
+            ("pass2", "Pass 2 centerline", True),
+            ("footprint", "Cutter footprints", True),
+            ("rejected", "Rejected paths / collisions", True),
+            ("inferred", "Inferred source edges", False),
+            ("uncertainty", "Geometry uncertainty overlay", False),
+            ("after", "Show simulated remaining copper", False),
         ):
             cb = QCheckBox(label); cb.setChecked(checked)
             cb.stateChanged.connect(self.rebuild_scene)
             self.layer_checks[key] = cb
             checks.addWidget(cb)
+        self.clear_candidates_list = QListWidget()
+        self.clear_candidates_list.setMaximumHeight(150)
+        self.clear_candidates_list.setToolTip("Each checked item explicitly classifies that residual zone as removable for this preview only")
+        self.clear_candidates_list.itemChanged.connect(self._residual_selection_changed)
+        checks.addWidget(QLabel("Optional residual zones · unchecked by default"))
+        checks.addWidget(self.clear_candidates_list)
         layout.addWidget(box)
         self.evidence_note = QLabel("Candidate geometry is for inspection only. Source conformance and machining eligibility are evaluated separately.")
         self.evidence_note.setWordWrap(True); self.evidence_note.setObjectName("note")
@@ -491,6 +529,8 @@ class PcbPrepWindow(QMainWindow):
         self.demo_geometry = None
         self.demo_canonical = None
         self.simulation_plan = None
+        self.multipass_plan = None
+        self.clearing_plan = None
         self.simulation_enabled = False
         self.simulation_action.setChecked(False)
         """Synchronous loader retained for deterministic smoke tests and captures."""
@@ -510,6 +550,10 @@ class PcbPrepWindow(QMainWindow):
         self.demo_canonical = synthetic_canonical_geometry()
         self.demo_geometry = self.demo_canonical.material("top-copper")
         self.simulation_plan = None
+        self.multipass_plan = None
+        self.clearing_plan = None
+        self.residual_candidates = ()
+        self._refresh_residual_candidates(())
         self.simulation_enabled = False
         self.simulation_action.setChecked(False)
         self._all_issue_rows.clear()
@@ -549,6 +593,10 @@ class PcbPrepWindow(QMainWindow):
         self.demo_canonical = synthetic_connected_canonical_geometry()
         self.demo_geometry = self.demo_canonical.material("top-copper")
         self.simulation_plan = None
+        self.multipass_plan = None
+        self.clearing_plan = None
+        self.residual_candidates = ()
+        self._refresh_residual_candidates(())
         self.simulation_enabled = False
         self.simulation_action.setChecked(False)
         self._all_issue_rows.clear()
@@ -610,6 +658,10 @@ class PcbPrepWindow(QMainWindow):
         if not enabled:
             self.simulation_enabled = False
             self.simulation_plan = None
+            self.multipass_plan = None
+            self.clearing_plan = None
+            self.residual_candidates = ()
+            self._refresh_residual_candidates(())
             self._all_issue_rows = [(issue, color) for issue, color in self._all_issue_rows
                                     if not issue.get("syntheticDiagnostic") and not issue.get("inspectionDiagnostic")]
             if self.current_issue and (self.current_issue.get("syntheticDiagnostic") or
@@ -640,15 +692,38 @@ class PcbPrepWindow(QMainWindow):
     def _update_simulation(self, *_):
         if not self.simulation_enabled:
             return
+        strategy = self.strategy_selector.currentData()
+        self.second_offset_input.setVisible(strategy == "two")
         material = (self.demo_geometry if self.demo_geometry is not None else
                     self.document.canonical_geometry.material("bottom-copper") if self.document else None)
         try:
             cutter = VBit(self.angle_input.value(), self.tip_input.value())
-            self.simulation_plan = plan_isolation(
+            baseline = plan_isolation(
                 material, cutter, self.depth_input.value(),
                 approximation_error_bound_mm=0.002)
+            self.simulation_plan = baseline
+            self.multipass_plan = None
+            self.clearing_plan = None
+            self.residual_candidates = ()
+            if strategy == "two":
+                self.multipass_plan = plan_two_pass(material, cutter, self.depth_input.value(),
+                    self.second_offset_input.value(), approximation_error_bound_mm=0.002,
+                    baseline_plan=baseline)
+                self.simulation_plan = self.multipass_plan.single_pass
+            elif strategy == "clear":
+                residual_material = material.difference(baseline.cutting_footprint)
+                self.residual_candidates = identify_residual_candidates(residual_material)
+                selected = self._refresh_residual_candidates()
+                self.clearing_plan = plan_selective_clearing(material,
+                    self.residual_candidates, selected, cutter=cutter,
+                    depth_mm=self.depth_input.value(), classified_for_preview=selected,
+                    approximation_error_bound_mm=0.002)
+            else:
+                self._refresh_residual_candidates(())
         except (ValueError, ArithmeticError) as exc:
             self.simulation_plan = None
+            self.multipass_plan = None
+            self.clearing_plan = None
             self.statusBar().showMessage(f"Simulation unavailable: {exc}")
             return
         plan = self.simulation_plan
@@ -683,20 +758,122 @@ class PcbPrepWindow(QMainWindow):
                 "inspectionDiagnostic": self.document is not None,
                 "isolationGeometry": diagnostic.geometry, "isolationCategory": diagnostic.category},
                 color=colors[diagnostic.category])
+        if self.multipass_plan is not None:
+            multi = self.multipass_plan
+            by_category = {}
+            for rejection in multi.rejections:
+                by_category.setdefault(rejection.category, []).append(rejection)
+            detail = "<br>".join(
+                f"{html.escape(category)}: {len(rows)} decision(s); "
+                f"retained swept area {sum(row.swept_footprint.area for row in rows):.8f} mm²; "
+                f"measured protected overlap {sum(row.protected_overlap.area for row in rows):.10f} mm²"
+                for category, rows in sorted(by_category.items())) or "No pass 2 rejections."
+            self._add_issue_row({
+                "title": "Pass 2 collision / topology review",
+                "severity": "NEEDS VERIFICATION", "category": "NEEDS VERIFICATION",
+                "layer": "Bottom copper · pass 2 diagnostic",
+                "summary": (f"Candidate {multi.candidate_length_mm:.2f} mm; accepted "
+                    f"{multi.accepted_length_mm:.2f} mm; skipped {multi.rejected_length_mm:.2f} mm; "
+                    f"topology-withheld {multi.topology_withheld_length_mm:.2f} mm; "
+                    f"{len(multi.rejections)} visible collision / topology decisions."),
+                "action": "Inspect the red rejected paths and footprints. Accepted segments passed full swept-footprint clearance checks; this remains diagnostic only.",
+                "advanced": (f"Additional cutter-center spacing: {multi.additional_offset_mm:.6f} mm beyond pass 1<br>"
+                    f"Effective cutter width: {multi.single_pass.effective_width_mm:.9f} mm; radius {multi.single_pass.centerline_offset_mm:.9f} mm<br>"
+                    f"Incremental swept area beyond pass 1: {multi.incremental_swept_area_mm2:.9f} mm²<br>"
+                    f"Incremental copper overlap: {multi.incremental_copper_removal_mm2:.12f} mm²<br>{detail}<br>"
+                    "No centerline-only safety decision is made; unresolved source and geometry status remain blocking."),
+                "kind": "isolation", "syntheticDiagnostic": self.demo_geometry is not None,
+                "inspectionDiagnostic": self.document is not None,
+                "isolationGeometry": multi.rejected_footprint,
+                "isolationCategory": "pass2 rejected"}, color=RED)
+        if self.clearing_plan is not None:
+            clearing = self.clearing_plan
+            unreachable_count = (len(clearing.unreachable_zones.geoms)
+                if hasattr(clearing.unreachable_zones, "geoms") else int(not clearing.unreachable_zones.is_empty))
+            self._add_issue_row({
+                "title": "Selected residual clearing review",
+                "severity": "NEEDS VERIFICATION", "category": "NEEDS VERIFICATION",
+                "layer": "Bottom copper · selected clearing preview",
+                "summary": (f"Selected cut length {clearing.accepted_paths.length:.2f} mm; "
+                    f"cleared {clearing.cleared_area_mm2:.6f} mm²; "
+                    f"uncut {clearing.remaining_selected_copper.area:.6f} mm²; "
+                    f"rejected {clearing.rejected_paths.length:.2f} mm; "
+                    f"unreachable {unreachable_count} region(s)."),
+                "action": "Only checked zones classified for preview are cleared. Review remaining and rejected geometry; canonical copper is unchanged.",
+                "advanced": (f"Selected candidate IDs: {', '.join(clearing.selected_ids) or 'none'}<br>"
+                    f"Rejected full-sweep footprint area: {clearing.rejected_footprint.area:.9f} mm²<br>"
+                    "Classification is local to this diagnostic preview and never grants manufacturing authorization."),
+                "kind": "isolation", "syntheticDiagnostic": self.demo_geometry is not None,
+                "inspectionDiagnostic": self.document is not None,
+                "isolationGeometry": clearing.unreachable_zones,
+                "isolationCategory": "clearing remaining"}, color=UNCERTAINTY_VIOLET)
         self._operation_changed(self.operation_selector.currentIndex())
         self.statusBar().showMessage(
             f"{'Inferred/hypothetical bottom copper · ' if self.document else ''}{plan.label} · {cutter.included_angle_deg:g}° · tip {cutter.tip_diameter_mm:.3f} mm · "
             f"depth {plan.depth_mm:.3f} mm · effective cut {plan.effective_width_mm:.3f} mm · "
-            f"centerline offset {plan.centerline_offset_mm:.3f} mm · "
+            f"pass 1 candidate length {plan.center_paths.length:.2f} mm · "
+            f"pass 1 cutter-center offset {plan.centerline_offset_mm:.3f} mm · "
             f"unfit area {plan.unfit_clearances.area:.4f} mm² · "
-            f"possible copper removal {plan.copper_intrusion.area:.4f} mm² · simulation only")
+            f"possible copper removal {plan.copper_intrusion.area:.4f} mm² · "
+            f"{self._strategy_measurement_text()} · inspection only; manufacturing remains BLOCKED")
         self.rebuild_scene()
+
+    def _strategy_measurement_text(self) -> str:
+        if self.multipass_plan is not None:
+            plan = self.multipass_plan
+            return (f"pass 2 spacing {plan.additional_offset_mm:.3f} mm beyond pass 1; "
+                    f"candidate/accepted/skipped {plan.candidate_length_mm:.2f}/"
+                    f"{plan.accepted_length_mm:.2f}/{plan.rejected_length_mm:.2f} mm; "
+                    f"topology withheld {plan.topology_withheld_length_mm:.2f} mm; "
+                    f"incremental sweep {plan.incremental_swept_area_mm2:.3f} mm²; "
+                    f"protected-copper overlap {plan.incremental_copper_removal_mm2:.9f} mm²")
+        if self.clearing_plan is not None:
+            plan = self.clearing_plan
+            return (f"selected cut length {plan.accepted_paths.length:.2f} mm; "
+                    f"selected clear {plan.cleared_area_mm2:.3f} mm²; "
+                    f"uncut selected copper {plan.remaining_selected_copper.area:.3f} mm²; "
+                    f"rejected {plan.rejected_paths.length:.2f} mm; "
+                    f"unreachable {len(getattr(plan.unreachable_zones, 'geoms', ())) or int(not plan.unreachable_zones.is_empty)} zones")
+        return "single-pass baseline"
+
+    def _refresh_residual_candidates(self, candidates=None):
+        if candidates is None:
+            candidates = self.residual_candidates
+        previous = {self.clear_candidates_list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(self.clear_candidates_list.count())
+                    if self.clear_candidates_list.item(i).checkState() == Qt.CheckState.Checked}
+        by_id = {candidate.candidate_id: candidate for candidate in candidates}
+        selected = tuple(candidate.candidate_id for candidate in candidates
+                         if candidate.candidate_id in previous and candidate.candidate_id in by_id)
+        self._refreshing_residuals = True
+        self.clear_candidates_list.blockSignals(True)
+        self.clear_candidates_list.clear()
+        for candidate in candidates:
+            item = QListWidgetItem(
+                f"Classify removable for preview · {candidate.area_mm2:.3f} mm²")
+            item.setData(Qt.ItemDataRole.UserRole, candidate.candidate_id)
+            item.setToolTip(candidate.classification_required + "; selection cannot authorize manufacturing")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if candidate.candidate_id in selected
+                               else Qt.CheckState.Unchecked)
+            self.clear_candidates_list.addItem(item)
+        self.clear_candidates_list.blockSignals(False)
+        self._refreshing_residuals = False
+        return selected
+
+    def _residual_selection_changed(self, *_):
+        if not self._refreshing_residuals and self.simulation_enabled:
+            self._update_simulation()
 
     def _install_document(self, fresh: BoardDocument):
         self.demo_geometry = None
         self.demo_canonical = None
         self.simulation_enabled = False
         self.simulation_plan = None
+        self.multipass_plan = None
+        self.clearing_plan = None
+        self.residual_candidates = ()
+        self._refresh_residual_candidates(())
         self.simulation_action.blockSignals(True)
         self.simulation_action.setChecked(False)
         self.simulation_action.blockSignals(False)
@@ -1152,22 +1329,64 @@ class PcbPrepWindow(QMainWindow):
         if not self.simulation_enabled or self.simulation_plan is None:
             return
         plan = self.simulation_plan
-        self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
-                           "Simulated cutting footprint · diagnostic only", 70, .32)
+        checked = {name: box.isChecked() for name, box in self.layer_checks.items()}
+        if checked.get("footprint"):
+            self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
+                               "Simulated cutting footprint · pass 1 · diagnostic only", 70, .32)
         selected = bool(self.current_issue and (self.current_issue.get("syntheticDiagnostic") or
                                                 self.current_issue.get("inspectionDiagnostic")))
-        if selected:
+        if selected and checked.get("pass1"):
             self.scene.addItem(FeaturePathItem(geometry_path(plan.center_paths),
                 {"label": "Selected proposed cutter-center path", "z": 79}, selected_toolpath_halo_pen()))
-        self._add_geometry(plan.center_paths, None, QColor(TOOLPATH_AMBER),
-                           "Proposed cutter-center path · not a toolpath", 80, 0,
-                           pen=proposed_toolpath_pen(selected=selected))
-        self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor(COLLISION_RED),
-                           "Isolation cannot fit · overlapping expanded copper", 90, .75)
-        self._add_geometry(plan.geometry_uncertainty, QColor(188, 140, 255, 110), QColor(UNCERTAINTY_VIOLET),
-                           "Geometry uncertainty · retained offset overlap", 95, .60)
-        self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor(COLLISION_RED),
-                           "Potential unintended copper removal", 100, .8)
+        if checked.get("pass1"):
+            self._add_geometry(plan.center_paths, None, QColor(TOOLPATH_AMBER),
+                               "Proposed cutter-center path · not a toolpath", 80, 0,
+                               pen=proposed_toolpath_pen(selected=selected))
+        if self.multipass_plan is not None:
+            multi = self.multipass_plan
+            if checked.get("pass2"):
+                pen = QPen(QColor(TEAL), 1.8, Qt.PenStyle.DashLine)
+                pen.setCosmetic(True)
+                self._add_geometry(multi.accepted_paths, None, QColor(TEAL),
+                    "Pass 2 accepted candidate · full V-bit sweep clear · not a toolpath", 82, 0, pen=pen)
+            if checked.get("rejected"):
+                pen = QPen(QColor(COLLISION_RED), 2.0, Qt.PenStyle.DashDotLine)
+                pen.setCosmetic(True)
+                self._add_geometry(multi.rejected_paths, None, QColor(COLLISION_RED),
+                    "Pass 2 rejected candidate · collision / topology / uncertainty", 86, 0, pen=pen)
+                self._add_geometry(multi.rejected_footprint, QColor(255, 65, 83, 100), QColor(COLLISION_RED),
+                    "Rejected full cutter sweep", 87, .60)
+            if checked.get("footprint"):
+                self._add_geometry(multi.accepted_footprint, QColor(48, 214, 195, 76), QColor(TEAL),
+                    "Pass 2 accepted full swept footprint", 71, .26)
+            if checked.get("uncertainty"):
+                self._add_geometry(multi.geometry_uncertainty, QColor(188, 140, 255, 105),
+                    QColor(UNCERTAINTY_VIOLET), "Pass 2 source / numerical uncertainty", 96, .60)
+        if self.clearing_plan is not None:
+            clearing = self.clearing_plan
+            pen = QPen(QColor("#e879f9"), 2.0, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            self._add_geometry(clearing.accepted_paths, None, QColor("#e879f9"),
+                "Selected residual clearing candidate · nested loops · preview only", 84, 0, pen=pen)
+            if checked.get("footprint"):
+                self._add_geometry(clearing.swept_footprint, QColor(232, 121, 249, 74),
+                    QColor("#e879f9"), "Selected residual full swept footprint", 73, .24)
+            if checked.get("rejected"):
+                rejected_pen = QPen(QColor(COLLISION_RED), 2.0, Qt.PenStyle.DashDotLine)
+                rejected_pen.setCosmetic(True)
+                self._add_geometry(clearing.rejected_paths, None, QColor(COLLISION_RED),
+                    "Rejected selected-clearing path", 88, 0, pen=rejected_pen)
+                self._add_geometry(clearing.unreachable_zones, QColor(255, 65, 83, 95),
+                    QColor(COLLISION_RED), "Selected clearing zone remains unreachable / uncut", 89, .55)
+        if checked.get("rejected"):
+            self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor(COLLISION_RED),
+                               "Isolation cannot fit · overlapping expanded copper", 90, .75)
+        if checked.get("uncertainty"):
+            self._add_geometry(plan.geometry_uncertainty, QColor(188, 140, 255, 110), QColor(UNCERTAINTY_VIOLET),
+                               "Geometry uncertainty · retained offset overlap", 95, .60)
+        if checked.get("rejected"):
+            self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor(COLLISION_RED),
+                               "Potential unintended copper removal", 100, .8)
         if self.current_issue and self.current_issue.get("isolationGeometry") is not None:
             self._add_geometry(self.current_issue["isolationGeometry"], None, QColor("#ffffff"),
                                "Selected diagnostic geometry", 110, 0,
@@ -1220,9 +1439,19 @@ class PcbPrepWindow(QMainWindow):
         if checked.get("top"):
             self._add_geometry(doc.canonical_geometry.material("top-copper"), QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
         if checked.get("bottom"):
-            self._add_geometry(doc.canonical_geometry.material("bottom-copper"), QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
+            bottom = doc.canonical_geometry.material("bottom-copper")
+            if checked.get("after") and self.simulation_plan is not None:
+                remaining = (self.multipass_plan.remaining_copper if self.multipass_plan is not None
+                             else doc.canonical_geometry.material("bottom-copper").difference(
+                                 self.simulation_plan.cutting_footprint))
+                if self.clearing_plan is not None:
+                    remaining = remaining.difference(self.clearing_plan.swept_footprint)
+                self._add_geometry(remaining, QColor(BLUE), QColor("#81b9ff"),
+                    "Simulated remaining copper · canonical source unchanged", 21, 0.40)
+            else:
+                self._add_geometry(bottom, QColor(BLUE), QColor("#81b9ff"), "Original bottom copper · canonical material", 21, 0.34)
         self._add_simulation_overlay()
-        if checked.get("candidate") or self.simulation_enabled:
+        if checked.get("inferred"):
             for region in doc.regions:
                 surviving = region.surviving_closure
                 if surviving is None or surviving.is_empty or surviving.length == 0:
@@ -1280,14 +1509,15 @@ class PcbPrepWindow(QMainWindow):
                 item = FeaturePathItem(path, {"label": f"Source region {region.index}", "region": region, "z": 60}, pen)
                 self.scene.addItem(item)
                 # Proposed closing chord remains separately styled and never changes the source contour.
-                closure = QPainterPath()
-                closure.moveTo(region.closure_start_mm[0], -region.closure_start_mm[1])
-                closure.lineTo(region.closure_end_mm[0], -region.closure_end_mm[1])
-                cpen = QPen(QColor(RED if region.index == 79 else GOLD), 2.0,
-                            Qt.PenStyle.DashLine if region.index == 79 else Qt.PenStyle.DotLine)
-                cpen.setCosmetic(True)
-                citem = FeaturePathItem(closure, {"label": f"Hypothetical closure {region.index}", "region": region, "z": 62}, cpen)
-                self.scene.addItem(citem)
+                if checked.get("inferred"):
+                    closure = QPainterPath()
+                    closure.moveTo(region.closure_start_mm[0], -region.closure_start_mm[1])
+                    closure.lineTo(region.closure_end_mm[0], -region.closure_end_mm[1])
+                    cpen = QPen(QColor(RED if region.index == 79 else GOLD), 2.0,
+                                Qt.PenStyle.DashLine if region.index == 79 else Qt.PenStyle.DotLine)
+                    cpen.setCosmetic(True)
+                    citem = FeaturePathItem(closure, {"label": f"Hypothetical closure {region.index}", "region": region, "z": 62}, cpen)
+                    self.scene.addItem(citem)
         if checked.get("candidate"):
             for region in doc.regions:
                 laser_candidate = region.native_polygon is not None and region.index != 79
