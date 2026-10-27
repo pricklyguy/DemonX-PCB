@@ -340,6 +340,7 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
         profile_parts: list[Any] = []
         issues: list[str] = []
         bottom_source_hash = ""
+        bottom_source_name = ""
         source_regions: list[dict] = []
         total_files = len(extracted)
         for file_index, path in enumerate(extracted, start=1):
@@ -357,6 +358,7 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                 elif layer_kind == "bottom" and geom is not None:
                     bottom_parts.append(geom)
                     bottom_source_hash = meta["sha256"]
+                    bottom_source_name = path.name
                     try:
                         source_regions = phase2d.scan(path.read_text(encoding="ascii"))
                     except Exception as exc:
@@ -396,16 +398,16 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                     if audit and audit.get("proposedRecoveryGeometry", {}).get("geometry"):
                         proposed = shape_from_geojson(audit["proposedRecoveryGeometry"]["geometry"])
                     regions.append(RegionData(
-                        index=i, source_file="Gerber_BottomLayer.GBL", source_sha256=bottom_source_hash,
+                        index=i, source_file=bottom_source_name, source_sha256=bottom_source_hash,
                         first_line=raw["g36Line"], last_line=raw["g37Line"], source_points_mm=points,
                         source_commands=tuple(raw.get("commands", [])),
                         closure_start_mm=end, closure_end_mm=start,
-                        polarity=audit.get("polarity", "unknown") if audit else "unknown",
+                        polarity=audit.get("polarity", raw["polarity"]) if audit else raw["polarity"],
                         issue=(f"{audit['status']} — {audit['issueClassification']}" if audit else "BLOCKED — no source-specific evidence"),
                         candidate_polygon=proposed, closure_length_mm=LineString([end,start]).length,
                         recovery_status=audit.get("status", "BLOCKED") if audit else "BLOCKED",
                         recovery_policy=audit.get("recoveryPolicyId") if audit else None,
-                        source_conforms_202605=audit.get("sourceConforms202605") if audit else None,
+                        source_conforms_202605=audit.get("sourceConforms202605") if audit else (False if start != end else None),
                         required_user_action=audit.get("requiredUserAction") if audit else None,
                     ))
             open_count = sum(r.source_points_mm[0] != r.source_points_mm[-1] for r in regions)
@@ -437,8 +439,11 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                                for feature in layer.features]
             error_bounds = [feature.get("polygonizationSagittaMm") for feature in feature_records
                             if feature.get("polygonizationSagittaMm") is not None]
+            # A viewer's implicit closing chord is a hypothetical fill, even if
+            # its polygon is valid. Do not label it verified derived material.
+            material_role = "hypothetical" if side == "bottom" and open_count else "verified-derived"
             layer_materials.append(LayerMaterial(name, side, "composed", geometry,
-                                                 source_rows, "verified-derived",
+                                                 source_rows, material_role,
                                                  max(error_bounds) if error_bounds else None))
         source_features = tuple({key: feature[key] for key in (
             "sourceFile", "sourceSha256", "objectIndex", "primitiveIndex", "primitiveType",

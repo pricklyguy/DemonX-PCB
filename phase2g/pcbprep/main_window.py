@@ -836,7 +836,7 @@ class PcbPrepWindow(QMainWindow):
                 summary = ("The recovered v2.0 saved fill closely matches this proposed display geometry, but the source Gerber contour is open and its v2.5 design intent is not proven. A different edge could change isolation clearance; machining remains blocked."
                            if region.native_polygon is not None else
                            "This copper region has an open boundary. Closing it differently could change where the isolation cutter removes copper. The displayed fill is a proposal only; machining remains blocked.")
-                action = "View the proposed edge here. Verify the intended design boundary before machining."
+                action = "View the proposed edge here. Re-export explicitly closed contours from the source design, or verify each proposed edge against the intended copper before machining."
                 color = GOLD
             advanced = (
                 f"Validation code: {'FULL_RING_MISMATCH' if region.index == 79 and laser else 'EXACT_ZERO_LENGTH_REGION_DRAW' if region.recovery_status == 'RECOVERABLE' else 'OPEN_SOURCE_CONTOUR'}<br>"

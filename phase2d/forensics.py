@@ -24,14 +24,16 @@ SCALE=100000
 def scan(text):
     if '%FSLAX45Y45*%' not in text or '%MOMM*%' not in text:
         raise ValueError('Scanner supports only declared absolute X4.5 mm')
-    x=y=0; mode='G01'; active=None; results=[]; modal=None
+    x=y=0; mode='G01'; active=None; results=[]; modal=None; polarity='dark'
     for m in re.finditer(r'[^*]+\*',text):
         raw=m.group().strip(' \r\n%'); c=raw.rstrip('*').strip('%\r\n ')
         line=text.count('\n',0,m.start()+len(m.group())-len(m.group().lstrip('\r\n% ')))+1
         if c.startswith('G04'): continue
+        if c in ('LPD','LPC'):
+            polarity='dark' if c=='LPD' else 'clear'
         if c=='G36':
             if active is not None: raise ValueError('nested region')
-            active={'g36Line':line,'commands':[],'contours':[]};modal=None;continue
+            active={'g36Line':line,'polarity':polarity,'commands':[],'contours':[]};modal=None;continue
         if c=='G37':
             if active is None: raise ValueError('G37 without G36')
             active['g37Line']=line;results.append(active);active=None;continue
