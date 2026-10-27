@@ -228,7 +228,7 @@ def quad_segments_for_error(radius_mm: float, error_mm: float) -> int:
 def plan_isolation(material, cutter: VBit, depth_mm: float, *,
                    approximation_error_bound_mm: float = 0.002,
                    machine_epsilon_mm: float = 1e-9) -> IsolationPlan:
-    """Build preview-only center contours around synthetic/verified copper.
+    """Build preview-only center contours around supplied composed copper.
 
     Circular-arc tessellation is conservatively selected from a sagitta target.
     GEOS offset topology can still collapse narrow features; those are explicitly
@@ -401,7 +401,15 @@ def synthetic_canonical_geometry() -> CanonicalGeometry:
         sources, drills)
 
 
-def eligibility_for_simulation(geometry: CanonicalGeometry) -> tuple[bool, str]:
+def eligibility_for_simulation(geometry: CanonicalGeometry, *, inspection_only: bool = False) -> tuple[bool, str]:
+    if inspection_only:
+        material = geometry.material("bottom-copper")
+        if (material is None or material.is_empty or not material.is_valid or
+                material.geom_type not in {"Polygon", "MultiPolygon"} or
+                not all(math.isfinite(value) for value in material.bounds)):
+            return False, "Simulation refused: inspection requires valid, nonempty bottom copper."
+        return True, ("Inspection-only simulation on inferred/hypothetical copper — "
+                      "Not Approved for Machining. Source findings and manufacturing blocks remain.")
     if geometry.machining_eligibility != "ELIGIBLE":
         return False, "Simulation refused: source geometry is blocked from machining eligibility."
     if geometry.source_conformance != "VALID" or geometry.independent_verification != "VERIFIED":

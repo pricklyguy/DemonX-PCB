@@ -179,7 +179,10 @@ class Phase2ICorpusTests(unittest.TestCase):
             window._install_document(doc)
             rows = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
                     for i in range(window.issues_list.count())]
-            region_rows = [x for x in rows if x.get("kind") == "region"]
+            # Repeated source warnings are grouped in the operation view;
+            # the distinct mismatch and every underlying source record remain.
+            self.assertEqual(len([x for x in rows if x.get("kind") == "region"]), 1)
+            region_rows = [x for x, _ in window._all_issue_rows if x.get("kind") == "region"]
             mismatch = next(x for x in region_rows if x["region"].index == 79)
             proposals = [x for x in region_rows if x["region"].index != 79]
             self.assertEqual(len(region_rows), 182)
@@ -189,6 +192,10 @@ class Phase2ICorpusTests(unittest.TestCase):
             self.assertTrue(all("saved fill closely matches" in x["summary"] for x in proposals))
             self.assertIn("Measured difference", window.evidence_note.text())
             self.assertIn("BLOCKED", window.eligibility.text())
+            window.operation_selector.setCurrentIndex(3)
+            full_rows = [window.issues_list.item(i).data(Qt.ItemDataRole.UserRole)
+                         for i in range(window.issues_list.count())]
+            self.assertEqual(sum(x.get("kind") == "region" for x in full_rows), 182)
             window.close()
         finally:
             doc.close()

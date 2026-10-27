@@ -16,6 +16,27 @@ Bottom-layer material that depends on open source regions uses the existing
 independent verification and manufacturing eligibility remain separate. This
 role does not change the preview geometry or approve any closure.
 
+The existing operation inspector groups repeated open-contour rows. Its Advanced
+details retain every source finding, and Full archive inspection retains the
+individual rows. Exact intersections of the inferred chords with final composed
+copper boundaries are highlighted separately; edges covered by later material
+are omitted from that overlay. Source contours and command provenance remain.
+
+Inspection-only V-bit simulation may consume valid hypothetical bottom copper
+through an explicit inspection gate. Missing source-contour provenance or
+unresolved bottom parser/topology conversions still refuse that preview. The
+strict eligibility gate, source-conformance state and manufacturing blocks do
+not change. Dashed center contours, cutting footprints and uncertainty remain
+diagnostic geometry; there is no production output or authorization path.
+
+This behavior is implemented independently with the existing geometry engine.
+Review of Gerbv's [parser](https://github.com/gerbv/gerbv/blob/develop/src/gerber.c)
+and [Cairo drawing implementation](https://github.com/gerbv/gerbv/blob/develop/src/draw.c)
+confirms that its renderer closes the drawing path at polygon-area end before
+filling it. No Gerbv implementation code is incorporated. Gerbv render agreement
+is recorded as display evidence, separately from numerical vector-material
+verification.
+
 `phase2n/source_audit.py` independently tokenizes a deliberately restricted
 absolute X4.5 metric linear subset, preserving integer coordinates, moves,
 draws, command positions and polarity. It does not use the application scanner

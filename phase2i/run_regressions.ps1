@@ -17,7 +17,7 @@ $steps = @(
     @{ Name = 'Phase 2K'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2k.test_phase2k','-v') },
     @{ Name = 'Phase 2L'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2l.test_geometry','phase2l.test_preview','-v') },
     @{ Name = 'Phase 2M'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2m.test_workflow','phase2m.test_launcher','-v') },
-    @{ Name = 'Phase 2N'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2n.test_audit','-v') }
+    @{ Name = 'Phase 2N'; Python = 'phase2g\.venv\Scripts\python.exe'; Args = @('-m','unittest','phase2n.test_audit','phase2n.test_compatibility','-v') }
 )
 
 Push-Location $root

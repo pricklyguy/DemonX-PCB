@@ -610,26 +610,42 @@ class PcbPrepWindow(QMainWindow):
         if not enabled:
             self.simulation_enabled = False
             self.simulation_plan = None
+            self._all_issue_rows = [(issue, color) for issue, color in self._all_issue_rows
+                                    if not issue.get("syntheticDiagnostic") and not issue.get("inspectionDiagnostic")]
+            if self.current_issue and (self.current_issue.get("syntheticDiagnostic") or
+                                       self.current_issue.get("inspectionDiagnostic")):
+                self.current_issue = None
+                self.selected_region = None
+            self._operation_changed(self.operation_selector.currentIndex())
             self.rebuild_scene()
             return
         if self.demo_geometry is None:
-            allowed, reason = eligibility_for_simulation(
-                self.document.canonical_geometry if self.document else
-                synthetic_canonical_geometry())
-            self.simulation_action.setChecked(False)
-            self.statusBar().showMessage(reason if not allowed else
-                "Load the explicit synthetic geometry demo to preview isolation simulation.")
-            return
+            if not self.document:
+                self.simulation_action.setChecked(False)
+                self.statusBar().showMessage("Simulation refused: load copper to inspect first.")
+                return
+            allowed, reason = eligibility_for_simulation(self.document.canonical_geometry, inspection_only=True)
+            if any(layer.kind == "bottom" and (layer.metadata.get("unresolvedCount") or
+                    layer.metadata.get("explicitTopologyRepairs")) for layer in self.document.layer_files):
+                allowed, reason = False, "Simulation refused: bottom copper has unresolved parser or topology conversions."
+            if any("Region source scan unavailable" in issue for issue in self.document.issues):
+                allowed, reason = False, "Simulation refused: bottom copper source-contour provenance is unavailable."
+            if not allowed:
+                self.simulation_action.setChecked(False)
+                self.statusBar().showMessage(reason)
+                return
         self.simulation_enabled = True
         self._update_simulation()
 
     def _update_simulation(self, *_):
-        if not self.simulation_enabled or self.demo_geometry is None:
+        if not self.simulation_enabled:
             return
+        material = (self.demo_geometry if self.demo_geometry is not None else
+                    self.document.canonical_geometry.material("bottom-copper") if self.document else None)
         try:
             cutter = VBit(self.angle_input.value(), self.tip_input.value())
             self.simulation_plan = plan_isolation(
-                self.demo_geometry, cutter, self.depth_input.value(),
+                material, cutter, self.depth_input.value(),
                 approximation_error_bound_mm=0.002)
         except (ValueError, ArithmeticError) as exc:
             self.simulation_plan = None
@@ -637,7 +653,7 @@ class PcbPrepWindow(QMainWindow):
             return
         plan = self.simulation_plan
         self._all_issue_rows = [(issue, color) for issue, color in self._all_issue_rows
-                                if not issue.get("syntheticDiagnostic")]
+                                if not issue.get("syntheticDiagnostic") and not issue.get("inspectionDiagnostic")]
         colors = {"cutter does not fit": RED,
                   "potential copper damage": RED,
                   "geometry uncertainty": UNCERTAINTY_VIOLET}
@@ -657,18 +673,19 @@ class PcbPrepWindow(QMainWindow):
             self._add_issue_row({"title": titles[diagnostic.category],
                 "severity": diagnostic.category.upper(), "category": "NEEDS VERIFICATION",
                 "layer": "Bottom copper · simulation", "summary": summary,
-                "action": "Inspect the highlighted synthetic geometry. This is diagnostic only and cannot approve a machining operation.",
+                "action": "Inspect the highlighted geometry. This inspection-only simulation cannot approve a machining operation.",
                 "advanced": (f"Cause: {html.escape(diagnostic.cause)}<br>Coordinate: {diagnostic.coordinate_mm}<br>"
                     f"Measured clearance: {diagnostic.measured_clearance_mm}; required: {diagnostic.required_clearance_mm:.9f} mm<br>"
                     f"Effective width: {diagnostic.effective_cut_width_mm:.9f} mm<br>"
                     f"Raw measured area: {diagnostic.raw_area_mm2:.12f} mm²; spatial uncertainty band: "
                     f"{plan.approximation_error_bound_mm:.6f} mm"),
-                "kind": "isolation", "syntheticDiagnostic": True,
+                "kind": "isolation", "syntheticDiagnostic": self.demo_geometry is not None,
+                "inspectionDiagnostic": self.document is not None,
                 "isolationGeometry": diagnostic.geometry, "isolationCategory": diagnostic.category},
                 color=colors[diagnostic.category])
         self._operation_changed(self.operation_selector.currentIndex())
         self.statusBar().showMessage(
-            f"{plan.label} · {cutter.included_angle_deg:g}° · tip {cutter.tip_diameter_mm:.3f} mm · "
+            f"{'Inferred/hypothetical bottom copper · ' if self.document else ''}{plan.label} · {cutter.included_angle_deg:g}° · tip {cutter.tip_diameter_mm:.3f} mm · "
             f"depth {plan.depth_mm:.3f} mm · effective cut {plan.effective_width_mm:.3f} mm · "
             f"centerline offset {plan.centerline_offset_mm:.3f} mm · "
             f"unfit area {plan.unfit_clearances.area:.4f} mm² · "
@@ -699,6 +716,9 @@ class PcbPrepWindow(QMainWindow):
             "<span style='color:#ff3155'>■ Measured difference</span> · <span style='color:#38f1d2'>┄ Saved native reference</span> "
             "(inspection only)"
         )
+        if any(layer.role == "hypothetical" for layer in fresh.canonical_geometry.layers):
+            self.evidence_note.setText(self.evidence_note.text() +
+                " · <b>Inferred/hypothetical copper</b> · violet dashes: inferred edges surviving in final copper")
         self._populate_sources()
         self._populate_issues()
         self.rebuild_scene()
@@ -729,6 +749,8 @@ class PcbPrepWindow(QMainWindow):
             f"{len(d.layer_files)} manufacturing files · {len(d.hits)} circular holes · "
             f"{len(d.slots)} routed slots · {len(d.regions)} copper regions.\n"
             f"Source status: {self._plain_source_status(d)}. Machining remains blocked."
+            + (" Copper fill is inferred/hypothetical; inspection-only isolation simulation is available."
+               if any(layer.role == "hypothetical" for layer in d.canonical_geometry.layers) else "")
         )
         self.inspect_action.setText("Select an issue for its geometry and suggested review action. No manufacturing operation is enabled.")
         self.view_issue_button.setVisible(False)
@@ -790,15 +812,16 @@ class PcbPrepWindow(QMainWindow):
         laser = any(region.native_polygon is not None for region in doc.regions)
         open_regions = [r for r in doc.regions if r.source_points_mm[0] != r.source_points_mm[-1]]
         recoverable = [r for r in doc.regions if r.recovery_status == "RECOVERABLE"]
-        if laser and open_regions:
+        if open_regions:
             self._add_issue_row({
                 "title": f"{len(open_regions)} copper regions have open boundaries",
                 "severity": "NEEDS VERIFICATION · source boundary issue", "layer": "Bottom copper",
                 "category": "NEEDS VERIFICATION",
-                "summary": "The export omitted closing edges. Proposed geometry is available for inspection, but the missing edges could change isolation clearance; the affected regions are not approved for machining.",
-                "action": "Select a region to view its proposed edge. Keep machining blocked until design intent is verified.",
+                "summary": "Copper is displayed with inferred/hypothetical closing edges. Inspection-only V-bit simulation is available; source nonconformance and machining blocks remain.",
+                "action": "Enable Isolation Simulation to inspect this material. Advanced details retain every source finding; Full archive inspection lists individual regions. Verify intent before manufacturing.",
                 "advanced": f"Validation code: OPEN_SOURCE_CONTOUR<br>Source: {html.escape(doc.archive_path.name)}<br>Archive SHA-256: <code>{doc.archive_sha256}</code><br>Affected region count: {len(open_regions)}<br>Recovery: none approved; no global closure policy is enabled.",
                 "region": None, "kind": "aggregate",
+                "sourceFindingCount": len(open_regions), "groupedOpenContours": True,
             }, color=RED)
         elif recoverable:
             self._add_issue_row({
@@ -861,7 +884,14 @@ class PcbPrepWindow(QMainWindow):
             self._add_issue_row({"title": title, "severity": severity, "layer": "Bottom copper",
                                  "summary": summary, "action": action, "advanced": advanced,
                 "region": region, "kind": "region",
-                "category": "BLOCKED" if region.index == 79 and laser else "NEEDS VERIFICATION"}, color=color)
+                "category": "BLOCKED" if region.index == 79 and laser else "NEEDS VERIFICATION",
+                "groupedOpenContour": is_open and not (region.index == 79 and laser)}, color=color)
+
+        group = next((issue for issue, _ in self._all_issue_rows if issue.get("groupedOpenContours")), None)
+        if group is not None:
+            group["advanced"] += "<hr>" + "<hr>".join(
+                f"<b>{html.escape(issue['title'])}</b><br>{issue['advanced']}"
+                for issue, _ in self._all_issue_rows if issue.get("kind") == "region")
 
         for issue in doc.issues:
             if "explicit GEOS repair" in issue or "parser geometry warnings" in issue or "unsupported" in issue:
@@ -992,7 +1022,7 @@ class PcbPrepWindow(QMainWindow):
         self.issues_list.blockSignals(True)
         self.issues_list.clear()
         for issue, color in self._all_issue_rows:
-            if relevant_to_operation(issue, key):
+            if relevant_to_operation(issue, key) and not (key != "full-archive" and issue.get("groupedOpenContour")):
                 self._append_issue_widget(issue, color)
         self.issues_list.blockSignals(False)
         self._update_operation_status()
@@ -1118,6 +1148,31 @@ class PcbPrepWindow(QMainWindow):
                 self.view.set_board_bounds(bounds)
             self.view.fit_board(self.document.bounds)
 
+    def _add_simulation_overlay(self):
+        if not self.simulation_enabled or self.simulation_plan is None:
+            return
+        plan = self.simulation_plan
+        self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
+                           "Simulated cutting footprint · diagnostic only", 70, .32)
+        selected = bool(self.current_issue and (self.current_issue.get("syntheticDiagnostic") or
+                                                self.current_issue.get("inspectionDiagnostic")))
+        if selected:
+            self.scene.addItem(FeaturePathItem(geometry_path(plan.center_paths),
+                {"label": "Selected proposed cutter-center path", "z": 79}, selected_toolpath_halo_pen()))
+        self._add_geometry(plan.center_paths, None, QColor(TOOLPATH_AMBER),
+                           "Proposed cutter-center path · not a toolpath", 80, 0,
+                           pen=proposed_toolpath_pen(selected=selected))
+        self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor(COLLISION_RED),
+                           "Isolation cannot fit · overlapping expanded copper", 90, .75)
+        self._add_geometry(plan.geometry_uncertainty, QColor(188, 140, 255, 110), QColor(UNCERTAINTY_VIOLET),
+                           "Geometry uncertainty · retained offset overlap", 95, .60)
+        self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor(COLLISION_RED),
+                           "Potential unintended copper removal", 100, .8)
+        if self.current_issue and self.current_issue.get("isolationGeometry") is not None:
+            self._add_geometry(self.current_issue["isolationGeometry"], None, QColor("#ffffff"),
+                               "Selected diagnostic geometry", 110, 0,
+                               pen=QPen(QColor("#ffffff"), 2.5, Qt.PenStyle.SolidLine))
+
     def rebuild_scene(self, *_):
         had_document = self.document is not None
         center = self.view.mapToScene(self.view.viewport().rect().center()) if had_document else None
@@ -1126,29 +1181,7 @@ class PcbPrepWindow(QMainWindow):
         if self.demo_geometry is not None:
             self._add_geometry(self.demo_geometry, QColor(BLUE), QColor("#81b9ff"),
                                "Synthetic original copper · not a board design", 21, .40)
-            if self.simulation_enabled and self.simulation_plan is not None:
-                plan = self.simulation_plan
-                self._add_geometry(plan.cutting_footprint, QColor(255, 183, 77), QColor("#ffb74d"),
-                                   "Simulated cutting footprint · diagnostic only", 70, .32)
-                selected_isolation = bool(self.current_issue and self.current_issue.get("syntheticDiagnostic"))
-                if selected_isolation:
-                    halo = FeaturePathItem(geometry_path(plan.center_paths),
-                        {"label": "Selected proposed cutter-center path", "z": 79},
-                        selected_toolpath_halo_pen())
-                    self.scene.addItem(halo)
-                self._add_geometry(plan.center_paths, None, QColor(TOOLPATH_AMBER),
-                                   "Proposed cutter-center path · not a toolpath", 80, 0,
-                                   pen=proposed_toolpath_pen(selected=selected_isolation))
-                self._add_geometry(plan.unfit_clearances, QColor(255, 66, 100), QColor(COLLISION_RED),
-                                   "Isolation cannot fit · overlapping expanded copper", 90, .75)
-                self._add_geometry(plan.geometry_uncertainty, QColor(188, 140, 255, 110), QColor(UNCERTAINTY_VIOLET),
-                                   "Geometry uncertainty · retained offset overlap", 95, .60)
-                self._add_geometry(plan.copper_intrusion, QColor(255, 0, 0), QColor(COLLISION_RED),
-                                   "Potential unintended copper removal", 100, .8)
-                if self.current_issue and self.current_issue.get("isolationGeometry") is not None:
-                    self._add_geometry(self.current_issue["isolationGeometry"], None, QColor("#ffffff"),
-                                       "Selected diagnostic geometry", 110, 0,
-                                       pen=QPen(QColor("#ffffff"), 2.5, Qt.PenStyle.SolidLine))
+            self._add_simulation_overlay()
             if self.current_issue and self.current_issue.get("syntheticRepairExample"):
                 region = self.current_issue["region"]
                 source = QPainterPath()
@@ -1188,6 +1221,18 @@ class PcbPrepWindow(QMainWindow):
             self._add_geometry(doc.canonical_geometry.material("top-copper"), QColor(COPPER), QColor("#f4a75b"), "Top copper", 20, 0.45)
         if checked.get("bottom"):
             self._add_geometry(doc.canonical_geometry.material("bottom-copper"), QColor(BLUE), QColor("#81b9ff"), "Bottom copper", 21, 0.34)
+        self._add_simulation_overlay()
+        if checked.get("candidate") or self.simulation_enabled:
+            for region in doc.regions:
+                surviving = region.surviving_closure
+                if surviving is None or surviving.is_empty or surviving.length == 0:
+                    continue
+                label = f"Inferred closing segment {region.index} · survives in final copper · unapproved"
+                self._add_geometry(surviving, None, QColor(UNCERTAINTY_VIOLET),
+                    label, 125, 0,
+                    pen=repair_proposal_pen(), metadata={"label": label, "region": region,
+                        "sourceFile": region.source_file, "sourceSha256": region.source_sha256,
+                        "sourceLines": (region.first_line, region.last_line), "hypothetical": True})
         for repaired, audit in self.approved_repair_layers:
             self._add_geometry(repaired, QColor(UNCERTAINTY_VIOLET), QColor("#e7c8ff"),
                                "Reviewed derived working geometry · source unchanged", 50, .45)

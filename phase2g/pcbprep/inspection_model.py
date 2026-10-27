@@ -101,6 +101,7 @@ class RegionData:
     discrepancy_source_segment_index: int | None = None
     discrepancy_native_segment_index: int | None = None
     source_commands: tuple[dict[str, Any], ...] = ()
+    surviving_closure: Any = None
 
 
 @dataclass
@@ -261,7 +262,7 @@ def _native_region_evidence(bottom_hash: str, regions: list[dict]) -> tuple[list
     records: list[RegionData] = []
     for i, raw in enumerate(regions):
         contour = raw["contours"][0]
-        points = [(float(x) * 1e-5, float(y) * 1e-5) for x, y in contour["points"]]
+        points = [(x / phase2d.SCALE, y / phase2d.SCALE) for x, y in contour["points"]]
         start, end = points[0], points[-1]
         candidate = Polygon(points) if len(points) >= 3 else None
         map_row = region_map[i] if i < len(region_map) else {}
@@ -391,7 +392,7 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
                 audited = _phase2e_region_records(bottom_source_hash)
                 for i, raw in enumerate(source_regions):
                     contour = raw["contours"][0]
-                    points = [(float(x)*1e-5, float(y)*1e-5) for x, y in contour["points"]]
+                    points = [(x / phase2d.SCALE, y / phase2d.SCALE) for x, y in contour["points"]]
                     start, end = points[0], points[-1]
                     audit = audited.get((raw["g36Line"], raw["g37Line"]))
                     proposed = None
@@ -419,6 +420,15 @@ def load_archive(archive: Path, progress=None) -> BoardDocument:
             strict_issue_count = 0
         if open_count:
             issues.append(f"Bottom copper contains {open_count} open Gerber region contours; source conformity warning")
+        if bottom is not None and not bottom.is_empty:
+            boundary = bottom.boundary
+            for region in regions:
+                if region.closure_length_mm:
+                    # Exact intersection with the final polygonal boundary:
+                    # later dark/clear events may cover all or part of a chord.
+                    # No buffer, endpoint motion or tolerance-based snapping.
+                    region.surviving_closure = LineString([
+                        region.closure_start_mm, region.closure_end_mm]).intersection(boundary)
         if all(g is None or g.is_empty for g in (top, bottom, profile_geom)):
             raise ValueError("Archive was parsed, but no copper or board profile layer was recognized")
         source_compliance = (f"NONCONFORMING — {open_count} open region contour(s)" if open_count
