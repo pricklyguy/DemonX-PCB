@@ -1,0 +1,283 @@
+{
+  "extractionPolicy": "content-sniffed Gerber/Excellon only; path/size/ratio guarded",
+  "boards": [
+    {
+      "archive": "Gerber_PCB_Valentine_Feb_New.zip",
+      "archivePath": "gerbers/Gerber_PCB_Valentine_Feb_New.zip",
+      "archiveSize": 225120,
+      "archiveSha256": "2e23a8cff4bd48d947f5f7fda371b8669d054c03cc87bb561bc2854d39337796",
+      "boardId": "gerber-pcb-valentine-feb-new",
+      "entryCount": 15,
+      "entries": [
+        {
+          "name": "Gerber_TopLayer.GTL",
+          "size": 12792
+        },
+        {
+          "name": "Gerber_BottomLayer.GBL",
+          "size": 168953
+        },
+        {
+          "name": "Gerber_TopSilkscreenLayer.GTO",
+          "size": 546337
+        },
+        {
+          "name": "Gerber_BottomSilkscreenLayer.GBO",
+          "size": 9297
+        },
+        {
+          "name": "Gerber_TopSolderMaskLayer.GTS",
+          "size": 5740
+        },
+        {
+          "name": "Gerber_BottomSolderMaskLayer.GBS",
+          "size": 6002
+        },
+        {
+          "name": "Gerber_BottomPasteMaskLayer.GBP",
+          "size": 599
+        },
+        {
+          "name": "Gerber_BoardOutlineLayer.GKO",
+          "size": 4174
+        },
+        {
+          "name": "Gerber_DocumentLayer.GDL",
+          "size": 1673
+        },
+        {
+          "name": "Gerber_DrillDrawingLayer.GDD",
+          "size": 7904
+        },
+        {
+          "name": "Drill_PTH_Through.DRL",
+          "size": 3878
+        },
+        {
+          "name": "Drill_NPTH_Through.DRL",
+          "size": 273
+        },
+        {
+          "name": "Drill_PTH_Through_Via.DRL",
+          "size": 379
+        },
+        {
+          "name": "FlyingProbeTesting.json",
+          "size": 84461
+        },
+        {
+          "name": "How-to-order-PCB.txt",
+          "size": 96
+        }
+      ],
+      "extractedManufacturingFiles": [
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_TopLayer.GTL",
+          "archiveMember": "Gerber_TopLayer.GTL",
+          "kind": "gerber",
+          "size": 12792,
+          "sha256": "059af9785d5c5d9d95d258f3906b3df32bc4c92d58ef0f3c1b5f1364f872d311"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_BottomLayer.GBL",
+          "archiveMember": "Gerber_BottomLayer.GBL",
+          "kind": "gerber",
+          "size": 168953,
+          "sha256": "f701e7ada043321c89a2c3baf73a84c32a3aad93cc3259bd9eff07bbd8e47843"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_TopSilkscreenLayer.GTO",
+          "archiveMember": "Gerber_TopSilkscreenLayer.GTO",
+          "kind": "gerber",
+          "size": 546337,
+          "sha256": "07bfb97cbd821d655aa301befe4ab7cc5174c78400449c3c02fd803be05de8e7"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_BottomSilkscreenLayer.GBO",
+          "archiveMember": "Gerber_BottomSilkscreenLayer.GBO",
+          "kind": "gerber",
+          "size": 9297,
+          "sha256": "4f34252041a06267db88daf44fce2b464965852927cc396dbefa3678abc23eef"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_TopSolderMaskLayer.GTS",
+          "archiveMember": "Gerber_TopSolderMaskLayer.GTS",
+          "kind": "gerber",
+          "size": 5740,
+          "sha256": "1c24dac34698ffea5f439f3d6de981db7086b842358c36e3c4c1112ecd8b7cc4"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_BottomSolderMaskLayer.GBS",
+          "archiveMember": "Gerber_BottomSolderMaskLayer.GBS",
+          "kind": "gerber",
+          "size": 6002,
+          "sha256": "5e3ccc899ffc7cd2bd501f0ed7aff8e6c950ce216113892cecd8a451e181e432"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_BottomPasteMaskLayer.GBP",
+          "archiveMember": "Gerber_BottomPasteMaskLayer.GBP",
+          "kind": "gerber",
+          "size": 599,
+          "sha256": "3c82812f7f6ca0984635ba8eb927ba6b2cc06b4d19f24003f4da0da1e6a79ac3"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_BoardOutlineLayer.GKO",
+          "archiveMember": "Gerber_BoardOutlineLayer.GKO",
+          "kind": "gerber",
+          "size": 4174,
+          "sha256": "7b221b6919856eb42d031d1b7c2d57bb9367ca322e88a736bb80eb01e34934c2"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_DocumentLayer.GDL",
+          "archiveMember": "Gerber_DocumentLayer.GDL",
+          "kind": "gerber",
+          "size": 1673,
+          "sha256": "a6c4c041195e06df8af24530f95bdda0eda245c07ea340548aebe3063438bfd5"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Gerber_DrillDrawingLayer.GDD",
+          "archiveMember": "Gerber_DrillDrawingLayer.GDD",
+          "kind": "gerber",
+          "size": 7904,
+          "sha256": "1594b03b7bdee861a828a7882934c65720c73cd00e607fd63c9df8d23de48d0a"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Drill_PTH_Through.DRL",
+          "archiveMember": "Drill_PTH_Through.DRL",
+          "kind": "excellon",
+          "size": 3878,
+          "sha256": "6e9d43f59addf1185359e96a9bf690e29ca8bfe6b0c231718a0f244cae8c8ac3"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Drill_NPTH_Through.DRL",
+          "archiveMember": "Drill_NPTH_Through.DRL",
+          "kind": "excellon",
+          "size": 273,
+          "sha256": "bcff992f5133feabc5f6699e9d5a9c6f8219a3ae780ae11c2d76f527cbf29b7b"
+        },
+        {
+          "path": "gerber-pcb-valentine-feb-new/Drill_PTH_Through_Via.DRL",
+          "archiveMember": "Drill_PTH_Through_Via.DRL",
+          "kind": "excellon",
+          "size": 379,
+          "sha256": "bc291cb1c0c106039e3356be996ae29eb6edab8ddfead33e803308235f1a222d"
+        }
+      ]
+    },
+    {
+      "archive": "Gerber_Prickly-Laser-Module-2.5.zip",
+      "archivePath": "gerbers/Gerber_Prickly-Laser-Module-2.5.zip",
+      "archiveSize": 192206,
+      "archiveSha256": "5e682b600dd19ee798d11830f0867f8cd686853d6a05620b8af174ba9ed3eb33",
+      "boardId": "gerber-prickly-laser-module-2-5",
+      "entryCount": 10,
+      "entries": [
+        {
+          "name": "Drill_PTH_Through.DRL",
+          "size": 3484
+        },
+        {
+          "name": "Drill_PTH_Through_Via.DRL",
+          "size": 238
+        },
+        {
+          "name": "Gerber_TopLayer.GTL",
+          "size": 5840
+        },
+        {
+          "name": "Gerber_BottomLayer.GBL",
+          "size": 179305
+        },
+        {
+          "name": "Gerber_TopSilkscreenLayer.GTO",
+          "size": 470421
+        },
+        {
+          "name": "Gerber_TopSolderMaskLayer.GTS",
+          "size": 6288
+        },
+        {
+          "name": "Gerber_BottomSolderMaskLayer.GBS",
+          "size": 6282
+        },
+        {
+          "name": "Gerber_BoardOutlineLayer.GKO",
+          "size": 524
+        },
+        {
+          "name": "Gerber_DocumentLayer.GDL",
+          "size": 2989
+        },
+        {
+          "name": "How-to-order-PCB.txt",
+          "size": 79
+        }
+      ],
+      "extractedManufacturingFiles": [
+        {
+          "path": "gerber-prickly-laser-module-2-5/Drill_PTH_Through.DRL",
+          "archiveMember": "Drill_PTH_Through.DRL",
+          "kind": "excellon",
+          "size": 3484,
+          "sha256": "ceaf282031642010a4a248c0d7c96b938ddd63ea47680e8e4786e42c2f9d2c91"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Drill_PTH_Through_Via.DRL",
+          "archiveMember": "Drill_PTH_Through_Via.DRL",
+          "kind": "excellon",
+          "size": 238,
+          "sha256": "a53d5714b33eaf5afca86a709931fa2a5601cd5b2ec9382ca5616e3409f94cd6"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_TopLayer.GTL",
+          "archiveMember": "Gerber_TopLayer.GTL",
+          "kind": "gerber",
+          "size": 5840,
+          "sha256": "54b30950ae05196c1273001f413f7af99cd026c071696ed9800e91b24c21739a"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_BottomLayer.GBL",
+          "archiveMember": "Gerber_BottomLayer.GBL",
+          "kind": "gerber",
+          "size": 179305,
+          "sha256": "6a6e08f4bf30852202e56e76d6ec43f50bcf564f33ef184e35afa71f4118359c"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_TopSilkscreenLayer.GTO",
+          "archiveMember": "Gerber_TopSilkscreenLayer.GTO",
+          "kind": "gerber",
+          "size": 470421,
+          "sha256": "4753ac971ebe24e3431142ffbc42a6a2e285924f132e76ddef22a112bc4b6439"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_TopSolderMaskLayer.GTS",
+          "archiveMember": "Gerber_TopSolderMaskLayer.GTS",
+          "kind": "gerber",
+          "size": 6288,
+          "sha256": "fc02d5ffa12b5dd24191ac6a30f088ea3860538c80acf83ff3392233904c0891"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_BottomSolderMaskLayer.GBS",
+          "archiveMember": "Gerber_BottomSolderMaskLayer.GBS",
+          "kind": "gerber",
+          "size": 6282,
+          "sha256": "4dd8528b638417acb24326491ebc54422789a0106a59c88119ceaa6f1e2ef3c5"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_BoardOutlineLayer.GKO",
+          "archiveMember": "Gerber_BoardOutlineLayer.GKO",
+          "kind": "gerber",
+          "size": 524,
+          "sha256": "78d5e8358f18691330796a22fa2051ba9310bf34f4b2bdf8caf4a79861415e65"
+        },
+        {
+          "path": "gerber-prickly-laser-module-2-5/Gerber_DocumentLayer.GDL",
+          "archiveMember": "Gerber_DocumentLayer.GDL",
+          "kind": "gerber",
+          "size": 2989,
+          "sha256": "8cc4ec49cde73ca64a60dd0d8186219c43dc1e79c4c7f13f0e475d66736779b0"
+        }
+      ]
+    }
+  ]
+}

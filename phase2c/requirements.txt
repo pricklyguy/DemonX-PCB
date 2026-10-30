@@ -1,0 +1,4 @@
+pygerber==2.4.3
+gerbonara==1.6.3
+shapely==2.2.0
+matplotlib==3.11.2

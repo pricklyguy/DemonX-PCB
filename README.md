@@ -11,6 +11,24 @@ This project was built for the real-world CNC crowd: people making prototype boa
 
 ---
 
+## New app: PCB → VCarve (in progress)
+
+`pcb2vectric/` is a rewrite in the spirit of CopperCAM/FlatCAM, except **VCarve makes the toolpaths and G-code**, using
+your own tools and post processors. This app prepares the geometry: it reads Gerber/Excellon properly (arcs, polarity,
+regions), generates multi-pass isolation sized for your V-bit, groups drills by the bits you own, mirrors the bottom
+layer and adds alignment holes for double-sided boards, then writes a DXF with one layer per operation plus a plain
+setup sheet saying what to enter in VCarve. Bits are read from your Vectric tool database (`.vtdb`).
+
+```bash
+pip install -r requirements.txt
+python -m pcb2vectric                      # GUI (Windows and Linux)
+python -m pcb2vectric ./gerbers out.dxf    # command line
+```
+
+Point it at your database with **Load .vtdb…** (it remembers). The original script below still works.
+
+---
+
 ## Quick Start
 
 1. [Download the script](#getting-the-script) and save it somewhere on your PC

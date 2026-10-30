@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:demonx:pcbprep:source-validation-record:0.1",
+  "title": "PCB Prep source validation and recovery diagnostic",
+  "type": "object",
+  "required": ["recordVersion", "id", "boardId", "sourceFile", "sourceSha256", "sourceCommandRange", "status", "severity", "issueClassification", "originalGeometry", "proposedChanges", "proposedRecoveryGeometry", "recoveryConfidence", "supportingEvidence", "manufacturingEligibility", "requiredUserAction", "acceptance"],
+  "properties": {
+    "recordVersion": {"const": "0.1"},
+    "id": {"type": "string"},
+    "boardId": {"type": "string"},
+    "sourceFile": {"type": "string"},
+    "sourceSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "sourceCommandRange": {"type": "object", "required": ["firstLine", "lastLine"], "properties": {"firstLine": {"type": "integer", "minimum": 1}, "lastLine": {"type": "integer", "minimum": 1}}},
+    "status": {"enum": ["VALID", "RECOVERABLE", "BLOCKED"]},
+    "severity": {"enum": ["info", "warning", "error"]},
+    "issueClassification": {"type": "string"},
+    "originalGeometry": {"type": "object", "required": ["units", "tickMm", "contours", "commands"]},
+    "proposedChanges": {"type": "array", "items": {"type": "object", "required": ["action"]}},
+    "proposedRecoveryGeometry": {"type": ["object", "null"]},
+    "recoveryConfidence": {"enum": ["CONFORMING", "EXACT_NON_MATERIAL", "INTENT_UNPROVEN"]},
+    "supportingEvidence": {"type": "array", "minItems": 1},
+    "sourceToRecoveryAreaDeltaMm2": {"type": ["number", "null"]},
+    "manufacturingEligibility": {"type": "object", "required": ["geometryEligible", "readyForMachining", "basis"], "properties": {"geometryEligible": {"type": "boolean"}, "readyForMachining": {"const": false}, "basis": {"type": "string"}}},
+    "requiredUserAction": {"type": "string"},
+    "acceptance": {"type": "object", "required": ["manualAcceptance", "independentDesignIntentEvidence", "unresolvedRisk"]}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "VALID"}}}, "then": {"properties": {"sourceConforms202605": {"const": true}}}},
+    {"if": {"properties": {"status": {"const": "BLOCKED"}}}, "then": {"properties": {"manufacturingEligibility": {"properties": {"geometryEligible": {"const": false}}}, "acceptance": {"properties": {"unresolvedRisk": {"const": true}}}}}}
+  ]
+}

@@ -1,0 +1,138 @@
+"""A PCB job: load layers, place them, and produce everything the DXF writer needs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+from shapely import affinity
+from shapely.geometry import Point, Polygon, box
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
+
+from . import gerber_io
+from .drills import DrillPlan, plan_drills
+from .gerber_io import Hole, Slot, _polys
+from .isolation import IsolationResult, IsolationSettings, find_tight_spots, generate_isolation
+
+
+@dataclass
+class JobConfig:
+    top: Optional[str] = None
+    bottom: Optional[str] = None
+    outline: Optional[str] = None
+    drills: List[str] = field(default_factory=list)
+    isolation: IsolationSettings = field(default_factory=IsolationSettings)
+    precompute_isolation: bool = False  # optional: also write offset isolation passes (VCarve normally does this)
+    gap_check: float = 0.2  # warn where copper features are closer than this (mm); 0 = off
+    skip_vias: bool = True  # holes smaller than via_max are vias: don't drill them, drop lone via pads
+    via_max: float = 0.6  # mm
+    drill_bits: List[float] = field(default_factory=lambda: [0.8, 1.0, 1.1, 1.2, 2.0, 3.0, 3.1])
+    zero_at_corner: bool = True  # move board lower-left to (0, 0)
+    align_holes: bool = False  # two registration holes on the flip axis (double-sided boards)
+    align_diameter: float = 3.0
+    align_margin: float = 5.0  # distance from the board edge to the alignment hole centre
+
+
+@dataclass
+class JobResult:
+    width: float
+    height: float
+    outline: Optional[BaseGeometry] = None
+    copper: dict = field(default_factory=dict)  # "TOP"/"BOTTOM" -> geometry (BOTTOM is mirrored)
+    isolation: dict = field(default_factory=dict)  # "TOP"/"BOTTOM" -> IsolationResult (only if precomputed)
+    tight: dict = field(default_factory=dict)  # "TOP"/"BOTTOM" -> list of points where copper gaps are too narrow
+    drills: Optional[DrillPlan] = None
+    align: List[Hole] = field(default_factory=list)
+    vias_ignored: int = 0
+    via_pads_removed: int = 0
+
+
+def _move_hole(h: Hole, dx: float, dy: float) -> Hole:
+    return Hole(h.x + dx, h.y + dy, h.diameter)
+
+
+@dataclass
+class LoadedJob:
+    """Parsed geometry in original file coordinates. Slow to build, so cached by the GUI."""
+
+    copper: dict
+    outline: Optional[BaseGeometry]
+    holes: List[Hole]
+    slots: List[Slot]
+
+
+def load_job(cfg: JobConfig) -> LoadedJob:
+    if not (cfg.top or cfg.bottom):
+        raise ValueError("Load at least one copper layer")
+    copper = {}
+    if cfg.top:
+        copper["TOP"] = gerber_io.load_copper(cfg.top)
+    if cfg.bottom:
+        copper["BOTTOM"] = gerber_io.load_copper(cfg.bottom)
+    outline = gerber_io.load_outline(cfg.outline) if cfg.outline else None
+    holes, slots = gerber_io.load_drills(*cfg.drills) if cfg.drills else ([], [])
+    return LoadedJob(copper, outline, holes, slots)
+
+
+LONE_VIA_MAX_EXTENT = 1.6  # mm; a copper island bigger than this isn't just a via pad
+
+
+def remove_lone_via_pads(copper: BaseGeometry, vias: List[Hole], others: List[Hole]):
+    """Drop small copper islands that exist only to carry a via. Pads on traces are left alone."""
+    keep, removed = [], 0
+    for poly in _polys(copper):
+        minx, miny, maxx, maxy = poly.bounds
+        small = max(maxx - minx, maxy - miny) <= LONE_VIA_MAX_EXTENT
+        has_via = any(poly.contains(Point(v.x, v.y)) for v in vias)
+        has_other = any(poly.contains(Point(h.x, h.y)) for h in others)
+        if small and has_via and not has_other:
+            removed += 1
+        else:
+            keep.append(poly)
+    return (unary_union(keep) if keep else Polygon()), removed
+
+
+def process_job(loaded: LoadedJob, cfg: JobConfig) -> JobResult:
+    """Place the loaded layers and generate isolation / drill plans. Fast enough to re-run on every edit."""
+    copper, outline = loaded.copper, loaded.outline
+    board = outline if outline is not None else unary_union(list(copper.values())).envelope
+    minx, miny, maxx, maxy = board.bounds
+    dx, dy = (-minx, -miny) if cfg.zero_at_corner else (0.0, 0.0)
+    width, height = maxx - minx, maxy - miny
+    axis_x = (minx + maxx) / 2 + dx  # vertical flip axis, in placed coordinates
+
+    def place(g):
+        return affinity.translate(g, dx, dy)
+
+    res = JobResult(width=width, height=height)
+    res.outline = place(outline) if outline is not None else None
+
+    holes = [_move_hole(h, dx, dy) for h in loaded.holes]
+    slots = [Slot(s.x1 + dx, s.y1 + dy, s.x2 + dx, s.y2 + dy, s.diameter) for s in loaded.slots]
+    vias = [h for h in holes if cfg.skip_vias and h.diameter < cfg.via_max]
+    holes = [h for h in holes if not (cfg.skip_vias and h.diameter < cfg.via_max)]
+    res.vias_ignored = len(vias)
+
+    for side, geom in copper.items():
+        geom = place(geom)
+        if vias:
+            geom, n = remove_lone_via_pads(geom, vias, holes)
+            res.via_pads_removed = max(res.via_pads_removed, n)  # top and bottom share via positions
+        if side == "BOTTOM":  # mirror across the flip axis, ready for the flipped setup
+            geom = affinity.scale(geom, xfact=-1, yfact=1, origin=(axis_x, 0))
+        res.copper[side] = geom
+        if cfg.precompute_isolation:
+            res.isolation[side] = generate_isolation(geom, cfg.isolation)
+        res.tight[side] = find_tight_spots(geom, cfg.gap_check) if cfg.gap_check > 0 else []
+
+    res.drills = plan_drills(holes, slots, cfg.drill_bits)
+
+    if cfg.align_holes:
+        top, bot = miny + dy - cfg.align_margin, maxy + dy + cfg.align_margin
+        res.align = [Hole(axis_x, top, cfg.align_diameter), Hole(axis_x, bot, cfg.align_diameter)]
+    return res
+
+
+def build_job(cfg: JobConfig) -> JobResult:
+    return process_job(load_job(cfg), cfg)

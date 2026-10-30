@@ -1,0 +1,35 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.vtdb
+*.vtdb.*
+shop PC/
+
+# Local manufacturing inputs and board-derived artifacts are retained locally.
+# They may contain user design data or third-party conformance corpora and are
+# not part of the public source checkpoint.
+/gerbers/
+/phase2a/fixtures/extracted/
+/phase2a/results/
+/phase2b/reference/
+/phase2c/results/
+/phase2d/results/
+/phase2e/fixtures/valentine-region-*.gbr
+/phase2e/results/
+/phase2f/fixtures/
+/phase2f/results/
+/phase2g/results/
+/phase2i/fixtures/kicad-interf-u/
+/phase2i/fixtures/ucamco-gerber-tests.zip
+/phase2i/results/
+/phase2j/results/
+/phase2j/input/
+/phase2k/results/
+/phase2k/input/
+/phase2m/results/
+/docs/PHASE2K_EASYEDA_EXPORT_RECONCILIATION_REPORT.md
+/phase2n/results/
+/docs/PHASE2N_REAL_BOARD_PARSER_AUDIT.md
+/docs/PHASE2N_GERBV_COMPATIBILITY_REPORT.md
+/docs/PHASE2O_MULTIPASS_ISOLATION_REPORT.md
