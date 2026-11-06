@@ -15,7 +15,7 @@ ARCHIVES = (
     ROOT / "gerbers" / "Gerber_PCB_Valentine_Feb_New.zip",
     ROOT / "gerbers" / "Gerber_Prickly-Laser-Module-2.5.zip",
 )
-OUT = Path(__file__).resolve().parent / "fixtures" / "extracted"
+OUT = Path(os.environ.get("DEMONX_PCBPREP_WORK_ROOT", Path(__file__).resolve().parent / "fixtures" / "extracted"))
 MAX_MEMBER_BYTES = 100 * 1024 * 1024
 MAX_TOTAL_BYTES = 500 * 1024 * 1024
 MAX_RATIO = 250

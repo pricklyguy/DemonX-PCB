@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") else Path(__file__).resolve().parents[2]
 for part in ("phase2a", "phase2d", "phase2f"):
     sys.path.insert(0, str(ROOT / part))
 

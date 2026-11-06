@@ -1,0 +1,17 @@
+import { mkdir, access } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+const here=path.dirname(fileURLToPath(import.meta.url));
+const root=path.resolve(here,'..');
+const out=path.join(here,'build');
+const target=path.join(out,'engine');
+const executable=process.platform==='win32'?'pcbprep-engine.exe':'pcbprep-engine';
+const pyinstaller=process.platform==='win32'?path.join(here,'.venv','Scripts','pyinstaller.exe'):path.join(here,'.venv','bin','pyinstaller');
+await access(pyinstaller).catch(()=>{throw new Error(`PyInstaller missing at ${pyinstaller}; run the explicit desktop setup command first.`)});
+await mkdir(target,{recursive:true});
+const phases=['phase2a','phase2c','phase2d','phase2e','phase2f','phase2g','phase2l','phase2m','phase2n','phase2o'];
+const args=['--noconfirm','--clean','--onefile','--name',executable.replace(/\.exe$/,''),'--distpath',target,'--workpath',path.join(out,'pyinstaller-work'),'--paths',path.join(root,'phase2g'),'--paths',root,...phases.flatMap(p=>['--paths',path.join(root,p)]),'--collect-all','gerbonara','--collect-all','pygerber',path.join(here,'engine','bridge.py')];
+const result=spawnSync(pyinstaller,args,{stdio:'inherit',windowsHide:true});
+if(result.status!==0)throw new Error(`PyInstaller failed with exit code ${result.status}`);
+console.log(`Built Python geometry engine for ${process.platform}-${process.arch}: ${path.join(target,executable)}`);

@@ -1,0 +1,36 @@
+{
+  "name": "demonx-pcb-prep-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "DemonX PCB Prep",
+  "description": "Read-only PCB geometry preparation and isolation diagnostics",
+  "author": "DemonX",
+  "license": "GPL-3.0-or-later",
+  "engines": {"node": ">=22.12"},
+  "main": "electron/main.mjs",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "electron electron/main.mjs",
+    "test": "node --test",
+    "test:engine": "python -m unittest test_engine.py -v",
+    "test:real-board": "node real-board-check.mjs",
+    "package:win": "npm run build && electron-builder --win portable --x64",
+    "package:linux": "npm run build && electron-builder --linux AppImage deb --x64"
+  },
+  "devDependencies": {"electron":"45.0.0","electron-builder":"26.7.0"},
+  "build": {
+    "appId":"com.demonx.pcbprep",
+    "productName":"DemonX PCB Prep",
+    "asar":true,
+    "directories":{"output":"release"},
+    "files":["electron/**","ui/**","package.json"],
+    "extraResources":[
+      {"from":"build/engine","to":"engine"},
+      {"from":"../assets/DemonX-PCB-Prep","to":"branding"}
+    ],
+    "win":{"icon":"../assets/DemonX-PCB-Prep/Windows/DemonX-PCB-Prep.ico","target":["portable"],"artifactName":"DemonX-PCB-Prep-${version}-Windows-${arch}.${ext}"},
+    "linux":{"icon":"../assets/DemonX-PCB-Prep/Linux/512x512/apps/DemonX-PCB-Prep.png","target":["AppImage","deb"],"category":"Development","executableName":"demonx-pcb-prep","artifactName":"DemonX-PCB-Prep-${version}-Linux-${arch}.${ext}"},
+    "portable":{"artifactName":"DemonX-PCB-Prep-${version}-Portable.${ext}"}
+  }
+}
