@@ -40,7 +40,8 @@ The available archive's SHA-256 is `2e23a8cff4bd48d947f5f7fda371b8669d054c03cc87
 - Windows engine build succeeded at `desktop/build/engine/pcbprep-engine.exe` (ignored build output).
 - Windows standalone portable package: **not produced**. Electron Builder reached Windows packaging, then failed extracting its `winCodeSign` support archive because the restricted build account cannot create the archive's macOS symbolic links (`A required privilege is not held by the client`). Retrying with automatic certificate discovery disabled produced the same failure. No installer/package success is claimed.
 - Linux AppImage/deb: **not built or runtime-tested**; this host is Windows. The native Linux build command and target metadata are present.
-- A real Electron window and Electron screenshots were **not captured**. The workspace Electron runtime reached Chromium startup, but Windows denied its sandbox token access to the workspace runtime folder's ACL. I did not weaken the ACL or disable Chromium sandboxing. The alternate Design runtime also could not create a window from this restricted launch context. This is an environment-limited launch check, not a reproduced application defect.
+- **Owner-session launch verification (2026-11-06):** the owner confirmed the DEV application launches, minimizes, maximizes, restores, and a second launch activates the same window instead of creating another instance.
+- Electron screenshots were **not captured**. The restricted automation launch reached Chromium startup, but Windows denied its sandbox token access to the workspace runtime folder's ACL. I did not weaken the ACL or disable Chromium sandboxing. The owner's independent launch verification resolves the visible-window launch check; it does not establish ZIP import or preview behavior in the Electron window.
 
 ## Test and validation results
 
@@ -70,7 +71,7 @@ Future Circuit handoff can open its existing Gerber ZIP through this activation 
 
 This branch is an implementation checkpoint, not an accepted standalone release. Before calling the milestone complete:
 
-1. Launch the DEV app in an unrestricted owner desktop session and confirm its native window, second-launch activation, close cleanup, diagnostics, and ZIP file-open behavior.
+1. In the owner desktop session, verify close cleanup, diagnostics, and ZIP file-open behavior; launch, minimize, maximize, restore, and second-launch activation are confirmed.
 2. Import the pinned Valentine archive in Electron and inspect copper, drills, zoom/pan, the 113 findings, BLOCKED status, and all three preview modes. Reconcile 225 contours, approximately 3,400.34 mm, and V-bit width against that exact archive.
 3. Complete a Windows portable package build in an environment that can extract the electron-builder signing support archive, then launch the package independently of the development venv.
 4. Build and launch the Linux AppImage or deb on native Linux; verify its bundled GEOS/Shapely runtime and desktop identity.
